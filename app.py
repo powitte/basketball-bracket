@@ -686,17 +686,13 @@ def show_submission_form(now):
 
     # ── Step 2: Bracket ───────────────────────────────────────────────────────
     total_games = 63
-    picks_made = sum(1 for v in st.session_state.picks.values() if v)
-    pct = picks_made / total_games
-    st.markdown(f"### Step 2 — Fill out your bracket &nbsp; `{picks_made} / {total_games} picks`")
-    st.progress(pct)
+    st.markdown("### Step 2 — Fill out your bracket")
 
-    # When 5 or fewer picks remain, show exactly which game(s) are missing
-    # so the user doesn't have to hunt through every tab to find the last one.
-    if 0 < (total_games - picks_made) <= 5:
-        missing = find_missing_games(st.session_state.picks)
-        if missing:
-            st.info("📍 **Still need to pick:** " + " · ".join(missing))
+    # Container created here so the progress bar appears above the tabs in the UI.
+    # We populate it AFTER rendering the tabs because each render_game_picker call
+    # writes into st.session_state.picks — counting before rendering gives a stale
+    # total that's always one pick behind.
+    picks_counter = st.container()
 
     # --- Bracket tabs ---
     tabs = st.tabs(["🔵 East", "🟠 South", "🔴 West", "🟢 Midwest", "🏆 Final Four"])
@@ -707,6 +703,20 @@ def show_submission_form(now):
 
     with tabs[4]:
         render_final_four_tab(st.session_state.picks)
+
+    # Compute AFTER tabs so all render_game_picker calls have updated st.session_state.picks
+    picks_made = sum(1 for v in st.session_state.picks.values() if v)
+    pct = picks_made / total_games
+
+    with picks_counter:
+        st.markdown(f"`{picks_made} / {total_games} picks`")
+        st.progress(pct)
+        # When 5 or fewer picks remain, show exactly which game(s) are missing
+        # so the user doesn't have to hunt through every tab to find the last one.
+        if 0 < (total_games - picks_made) <= 5:
+            missing = find_missing_games(st.session_state.picks)
+            if missing:
+                st.info("📍 **Still need to pick:** " + " · ".join(missing))
 
     # ── Step 3: Submit ────────────────────────────────────────────────────────
     st.markdown("---")
