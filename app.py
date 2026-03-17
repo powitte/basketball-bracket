@@ -461,7 +461,10 @@ def render_game_picker(game, picks):
 
     label_a = f"({seed_a}) {team_a}" if seed_a else team_a
     label_b = f"({seed_b}) {team_b}" if seed_b else team_b
-    options = ["— pick winner —", label_a, label_b]
+    # Show the matchup as the placeholder so the user can see who's playing
+    # before they make a pick — e.g. "Duke (1) vs Siena (16)"
+    matchup_label = f"{team_a} ({seed_a}) vs {team_b} ({seed_b})"
+    options = [matchup_label, label_a, label_b]
 
     current_pick = picks.get(game_id)
     if current_pick == team_a:
