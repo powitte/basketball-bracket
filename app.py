@@ -11,6 +11,7 @@
 #   AFTER deadline  → show the leaderboard and completed game results
 # ---------------------------------------------------------------------------
 
+import random
 import streamlit as st
 from datetime import datetime
 import fitz  # PyMuPDF — converts the bracket PDF to a displayable image
@@ -40,8 +41,17 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 # Orange is the primary accent (Trale's pick). Navy is the secondary.
 # We inject CSS once at the top so every element in the app can use it.
+#
+# IMPORTANT: `color-scheme: light` on :root tells the browser to use light-mode
+# system colors throughout the page. Without this, Chrome on a Chromebook in
+# dark mode can inherit white text — which is invisible on our white backgrounds.
 st.markdown("""
 <style>
+    /* Force light-mode rendering — prevents white-on-white text in Chrome dark mode */
+    :root {
+        color-scheme: light;
+    }
+
     /* ── Color palette ── */
     :root {
         --orange:      #E8651A;
@@ -56,6 +66,7 @@ st.markdown("""
         --white:       #FFFFFF;
         --border:      #E0D6CC;
         --text-muted:  #7A6F68;
+        --text-dark:   #1E1E1E;
     }
 
     /* ── Page background ── */
@@ -90,15 +101,36 @@ st.markdown("""
     }
 
     /* ── Selectbox (bracket slot) styling ── */
+    /* The label is hidden — the matchup placeholder serves as the label */
     .stSelectbox > label { display: none; }
     .stSelectbox > div > div {
         border: 2px solid var(--border) !important;
         border-radius: 6px !important;
         background-color: var(--white) !important;
+        color: var(--text-dark) !important;   /* explicit dark text — Chrome dark mode fix */
         font-size: 0.85rem !important;
     }
     .stSelectbox > div > div:hover {
         border-color: var(--orange) !important;
+    }
+    /* Covers the selected-value text inside the selectbox control */
+    [data-baseweb="select"] > div {
+        color: var(--text-dark) !important;
+        background-color: var(--white) !important;
+    }
+    /* Dropdown list options (the popup that appears when you click) */
+    [data-baseweb="popover"] li,
+    [data-baseweb="menu"] li {
+        color: var(--text-dark) !important;
+        background-color: var(--white) !important;
+    }
+
+    /* ── Expander (bracket PDF viewer) ── */
+    /* Chrome dark mode can render expander summary text as white — force navy */
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] summary p,
+    [data-testid="stExpander"] summary span {
+        color: var(--navy) !important;
     }
 
     /* ── Round column header banners ── */
@@ -192,6 +224,17 @@ st.markdown("""
         align-items: center;
         gap: 12px;
     }
+
+    /* ── Strategy description card (used in Help me pick section) ── */
+    .strategy-card {
+        background: linear-gradient(135deg, #2C5499, #1B3A6B);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin: 6px 0 10px 0;
+        color: white;
+        font-size: 0.9rem;
+    }
+    .strategy-card b { color: var(--gold); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -206,6 +249,20 @@ if "picks" not in st.session_state:
 
 if "submitted" not in st.session_state:
     st.session_state.submitted = False  # True after a successful submission
+
+# method: how the user filled their bracket
+#   "custom"  — filled manually (default), or modified an auto-filled bracket
+#   "seed"    — auto-filled by seed (chalk)
+#   "mascot"  — auto-filled by mascot battle ratings
+#   "random"  — auto-filled by pure coin flip
+if "method" not in st.session_state:
+    st.session_state.method = "custom"
+
+# auto_fill_snapshot: a copy of picks immediately after auto-fill.
+# We compare current picks against this snapshot on every rerun;
+# any difference means the user manually changed something → method = "custom".
+if "auto_fill_snapshot" not in st.session_state:
+    st.session_state.auto_fill_snapshot = None
 
 
 # ---------------------------------------------------------------------------
@@ -284,11 +341,241 @@ def render_bracket_image():
 
 
 # ===========================================================================
+# AUTO-PICK STRATEGIES
+# ===========================================================================
+# Three strategies for automatically filling all 63 game picks.
+# All three process games in round order (1 → 6) so that each round's results
+# are available before the next round tries to resolve its team matchups.
+# They build and return a fresh picks dict without touching session state directly.
+
+# ---------------------------------------------------------------------------
+# MASCOT POWER RATINGS
+# ---------------------------------------------------------------------------
+# Scale 1–10. Higher = wins the hypothetical fight.
+# Used by the "mascot battle" auto-fill strategy. Ties are randomized.
+# Ratings are intentionally a bit opinionated and fun — argue with your bracket.
+MASCOT_POWER = {
+    # ── East ──
+    "Duke":          7,   # Blue Devils — supernatural, but more mischievous than menacing
+    "Siena":         5,   # Saints — holy, but not exactly fighters
+    "Ohio St.":      2,   # Buckeyes — it is literally a nut
+    "TCU":           5,   # Horned Frogs — cool name, still a frog
+    "St. John's":    6,   # Red Storm — weather force counts
+    "N. Iowa":       8,   # Panthers — big cat
+    "Kansas":        5,   # Jayhawks — mythological bird/soldier hybrid
+    "Cal Baptist":   6,   # Lancers — mounted knight with a lance
+    "Louisville":    4,   # Cardinals — small bird
+    "South Florida": 7,   # Bulls — 1,500 lb aggressive animal
+    "Michigan St.":  8,   # Spartans — elite ancient warriors
+    "N. Dakota St.": 7,   # Bison — massive, powerful
+    "UCLA":          8,   # Bruins — bears
+    "UCF":           7,   # Knights — armored warrior
+    "UConn":         6,   # Huskies — tough working sled dog
+    "Furman":        6,   # Paladins — holy knights
+    # ── South ──
+    "Florida":       9,   # Gators — apex predator
+    "PVAM/LEH":      7,   # Panthers/Mountain Hawks — big cat + predatory bird, averaged
+    "Clemson":       9,   # Tigers — apex predator
+    "Iowa":          5,   # Hawkeyes — sharp-eyed human (literary character, not a bird)
+    "Vanderbilt":    5,   # Commodores — naval officer rank
+    "McNeese":       5,   # Cowboys — tough, but still a human
+    "Nebraska":      3,   # Cornhuskers — farmer
+    "Troy":          7,   # Trojans — ancient elite warriors
+    "N. Carolina":   4,   # Tar Heels — Civil War infantry nickname (stubbornness, not ferocity)
+    "VCU":           7,   # Rams — aggressive horned animal
+    "Illinois":      6,   # Illini — tribal warrior
+    "Penn":          2,   # Quakers — literally committed to nonviolence
+    "Saint Mary's":  5,   # Gaels — Celtic/Irish warriors
+    "Texas A&M":     3,   # Aggies — agriculture students
+    "Houston":       9,   # Cougars — apex predator (big cat)
+    "Idaho":         6,   # Vandals — Germanic warriors who sacked Rome
+    # ── West ──
+    "Arizona":       8,   # Wildcats — fierce cat
+    "LIU":           9,   # Sharks — apex ocean predator
+    "Villanova":     8,   # Wildcats — fierce cat
+    "Utah St.":      3,   # Aggies — agriculture students
+    "Wisconsin":     7,   # Badgers — ferocious relative to their size
+    "High Point":    8,   # Panthers — big cat
+    "Arkansas":      8,   # Razorbacks — feral wild boar, notoriously aggressive
+    "Hawaii":        7,   # Warriors — general warrior class
+    "BYU":           9,   # Cougars — apex predator (big cat)
+    "TEX/NCST":      8,   # Longhorns/Wolfpack — large horned bovine / wolf pack
+    "Gonzaga":       6,   # Bulldogs — tough dog
+    "Kennesaw St.":  5,   # Owls — predatory but small
+    "Miami":         7,   # Hurricanes — devastating natural force
+    "Missouri":      9,   # Tigers — apex predator
+    "Purdue":        4,   # Boilermakers — industrial worker
+    "Queens":        5,   # Royals — status, not fighters
+    # ── Midwest ──
+    "Michigan":      10,  # Wolverines — pound for pound the most ferocious animal alive
+    "UMBC/HOW":      5,   # Retrievers/Bison — friendly dog + massive animal, averaged to 5
+    "Georgia":       6,   # Bulldogs — tough dog
+    "Saint Louis":   3,   # Billikens — a small good-luck gnome figurine
+    "Texas Tech":    6,   # Red Raiders — cavalry raiders
+    "Akron":         4,   # Zips — named after a rubber boot brand (Zipper boots)
+    "Alabama":       6,   # Crimson Tide — tidal force
+    "Hofstra":       5,   # Pride — it's the concept of a lion pride, not a lion itself
+    "Tennessee":     5,   # Volunteers — civilian soldiers
+    "M-OH/SMU":      6,   # RedHawks/Mustangs — predatory bird / wild horse, averaged
+    "Virginia":      6,   # Cavaliers — royalist cavalry
+    "Wright St.":    6,   # Raiders — military raiders
+    "Kentucky":      8,   # Wildcats — fierce cat
+    "Santa Clara":   6,   # Broncos — wild horse
+    "Iowa St.":      7,   # Cyclones — destructive weather
+    "Tennessee St.": 9,   # Tigers — apex predator
+}
+
+
+def auto_pick_by_seed():
+    """Fill all 63 games by always picking the better (lower) seed.
+
+    Equal seeds and the Championship game (round 6) are randomized.
+    The user requested random for "the finals" — because at that point
+    any 1-seed can win, and chalk just means everyone ties.
+
+    Processes rounds in order so that each round's picks are ready
+    before the next round's resolve_teams() calls need them.
+
+    Returns a complete picks dict {game_id: team_name}.
+    """
+    picks = {}
+    for round_num in range(1, 7):
+        for game in GAMES:
+            if game["round"] != round_num:
+                continue
+            team_a, seed_a, team_b, seed_b = resolve_teams(game["id"], picks)
+            if not team_a or not team_b:
+                continue  # should not happen in a well-formed bracket
+
+            if game["round"] == 6:
+                # Championship: randomize regardless of seeds
+                picks[game["id"]] = random.choice([team_a, team_b])
+            elif seed_a < seed_b:
+                picks[game["id"]] = team_a   # team_a is the better seed
+            elif seed_b < seed_a:
+                picks[game["id"]] = team_b   # team_b is the better seed
+            else:
+                # Equal seeds (common in later rounds, e.g., two 1-seeds) → coin flip
+                picks[game["id"]] = random.choice([team_a, team_b])
+    return picks
+
+
+def auto_pick_by_mascot():
+    """Fill all 63 games using the MASCOT_POWER fight ratings above.
+
+    Higher power wins. Ties are randomized.
+    Returns a complete picks dict {game_id: team_name}.
+    """
+    picks = {}
+    for round_num in range(1, 7):
+        for game in GAMES:
+            if game["round"] != round_num:
+                continue
+            team_a, seed_a, team_b, seed_b = resolve_teams(game["id"], picks)
+            if not team_a or not team_b:
+                continue
+
+            power_a = MASCOT_POWER.get(team_a, 5)  # default 5 if team somehow not in dict
+            power_b = MASCOT_POWER.get(team_b, 5)
+
+            if power_a > power_b:
+                picks[game["id"]] = team_a
+            elif power_b > power_a:
+                picks[game["id"]] = team_b
+            else:
+                # Equal mascot power → coin flip
+                picks[game["id"]] = random.choice([team_a, team_b])
+    return picks
+
+
+def auto_pick_random():
+    """Fill all 63 games by random coin flip.
+
+    Returns a complete picks dict {game_id: team_name}.
+    """
+    picks = {}
+    for round_num in range(1, 7):
+        for game in GAMES:
+            if game["round"] != round_num:
+                continue
+            team_a, seed_a, team_b, seed_b = resolve_teams(game["id"], picks)
+            if not team_a or not team_b:
+                continue
+            picks[game["id"]] = random.choice([team_a, team_b])
+    return picks
+
+
+def apply_auto_picks(new_picks, method):
+    """Write auto-generated picks into session state and record the strategy.
+
+    IMPORTANT: we also delete the cached Streamlit widget state for every
+    selectbox. Streamlit caches widget values by key; if we only update
+    st.session_state.picks without clearing the widget cache, the selectboxes
+    on screen won't show the new picks — they'll keep showing the old values.
+    Deleting the keys forces each selectbox to reinitialize from the new picks.
+    """
+    for game in GAMES:
+        widget_key = f"pick_{game['id']}"
+        if widget_key in st.session_state:
+            del st.session_state[widget_key]
+
+    st.session_state.picks = new_picks
+
+    # Save a snapshot so we can detect later if the user manually changed anything
+    st.session_state.auto_fill_snapshot = dict(new_picks)
+    st.session_state.method = method
+
+
+# ===========================================================================
+# MISSING PICKS DIAGNOSTIC
+# ===========================================================================
+
+def find_missing_games(picks):
+    """Return human-readable descriptions of any games that are still unpicked.
+
+    Only reports games where both teams are already determined — i.e., all
+    upstream picks have been made. Games that are locked behind earlier
+    unresolved matchups aren't counted here; they'll surface naturally as
+    the user fills those earlier rounds.
+
+    Returns a list of strings like ["Final Four tab → Championship"].
+    This is intentionally a navigation hint, not just a game ID.
+    """
+    missing = []
+    for game in GAMES:
+        team_a, _, team_b, _ = resolve_teams(game["id"], picks)
+        if not team_a or not team_b:
+            continue  # matchup not determinable yet — skip
+        if not picks.get(game["id"]):
+            region = game["region"]
+            round_name = ROUND_NAMES[game["round"]]
+            if game["round"] >= 5:
+                # Final Four and Championship are both in the Final Four tab
+                missing.append(f"**Final Four tab** → {round_name}")
+            else:
+                missing.append(f"**{region} tab** → {round_name}")
+    return missing
+
+
+# ===========================================================================
 # SUBMISSION FORM
 # ===========================================================================
 
+# Human-readable labels and icons for each method key
+METHOD_ICONS  = {"custom": "🎨", "seed": "🌱", "mascot": "⚔️", "random": "🎲"}
+METHOD_LABELS = {"custom": "Custom", "seed": "By seed", "mascot": "Mascot battle", "random": "Random"}
+
+
 def show_submission_form(now):
     """Show the bracket pick form before the submission deadline."""
+
+    # --- Detect manual edits after auto-fill ---
+    # If picks have diverged from the auto-fill snapshot, mark method as custom.
+    # This runs at the top of every rerun so it always reflects the latest state.
+    snapshot = st.session_state.auto_fill_snapshot
+    if snapshot is not None and st.session_state.picks != snapshot:
+        st.session_state.method = "custom"
+        st.session_state.auto_fill_snapshot = None
 
     # --- Countdown banner ---
     time_left = SUBMISSION_DEADLINE - now
@@ -308,6 +595,8 @@ def show_submission_form(now):
         if st.button("Submit a different bracket"):
             st.session_state.submitted = False
             st.session_state.picks = {}
+            st.session_state.method = "custom"
+            st.session_state.auto_fill_snapshot = None
             st.rerun()
         return
 
@@ -320,7 +609,7 @@ def show_submission_form(now):
 
     st.markdown("---")
 
-    # --- Name field ---
+    # ── Step 1: Name ──────────────────────────────────────────────────────────
     st.markdown("### Step 1 — Enter your name")
     name = st.text_input(
         "Your name",
@@ -329,12 +618,85 @@ def show_submission_form(now):
         label_visibility="collapsed",
     )
 
-    # --- Progress indicator ---
+    st.markdown("---")
+
+    # ── Step 1.5: Help me pick (optional) ────────────────────────────────────
+    st.markdown("### 🤔 Need help? Pick a strategy *(optional)*")
+    st.caption(
+        "Choose a strategy and click **Fill my bracket!** to auto-fill all 63 picks instantly. "
+        "You can change individual picks afterward — it'll be marked Custom."
+    )
+
+    # Map display label → internal method key (None = no auto-fill)
+    STRATEGY_OPTIONS = {
+        "(I'll fill it myself)":                        None,
+        "🌱 By seed — chalk, always pick the favorite": "seed",
+        "⚔️ Mascot battle — fiercer mascot wins":       "mascot",
+        "🎲 Random — pure coin flip, no regrets":        "random",
+    }
+
+    chosen_strategy_label = st.selectbox(
+        "Pick a strategy",
+        options=list(STRATEGY_OPTIONS.keys()),
+        key="strategy_dropdown",
+        label_visibility="collapsed",
+    )
+    chosen_strategy = STRATEGY_OPTIONS[chosen_strategy_label]
+
+    if chosen_strategy is not None:
+        # Show a brief description of what this strategy does
+        descriptions = {
+            "seed": (
+                "<b>🌱 Chalk picks:</b> the lower seed always wins through the Final Four. "
+                "The Championship is randomized — at that point, who really knows?"
+            ),
+            "mascot": (
+                "<b>⚔️ Mascot battle:</b> every game is won by the fiercer mascot. "
+                "Wolverines (10/10) devour everything. Quakers (2/10) do not fight. Ties are coin flips."
+            ),
+            "random": (
+                "<b>🎲 Random bracket:</b> every game is a coin flip. "
+                "Statistically indistinguishable from most human bracket strategies."
+            ),
+        }
+        st.markdown(
+            f'<div class="strategy-card">{descriptions[chosen_strategy]}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if st.button("🎯 Fill my bracket!", key="auto_fill_btn"):
+            if chosen_strategy == "seed":
+                new_picks = auto_pick_by_seed()
+            elif chosen_strategy == "mascot":
+                new_picks = auto_pick_by_mascot()
+            else:
+                new_picks = auto_pick_random()
+            apply_auto_picks(new_picks, chosen_strategy)
+            st.rerun()
+
+    # Show a status badge if a strategy is currently active
+    current_method = st.session_state.method
+    if current_method != "custom":
+        st.success(
+            f"{METHOD_ICONS[current_method]} Bracket filled using "
+            f"**{METHOD_LABELS[current_method]}**. Change any pick to go Custom."
+        )
+
+    st.markdown("---")
+
+    # ── Step 2: Bracket ───────────────────────────────────────────────────────
     total_games = 63
     picks_made = sum(1 for v in st.session_state.picks.values() if v)
     pct = picks_made / total_games
     st.markdown(f"### Step 2 — Fill out your bracket &nbsp; `{picks_made} / {total_games} picks`")
     st.progress(pct)
+
+    # When 5 or fewer picks remain, show exactly which game(s) are missing
+    # so the user doesn't have to hunt through every tab to find the last one.
+    if 0 < (total_games - picks_made) <= 5:
+        missing = find_missing_games(st.session_state.picks)
+        if missing:
+            st.info("📍 **Still need to pick:** " + " · ".join(missing))
 
     # --- Bracket tabs ---
     tabs = st.tabs(["🔵 East", "🟠 South", "🔴 West", "🟢 Midwest", "🏆 Final Four"])
@@ -346,7 +708,7 @@ def show_submission_form(now):
     with tabs[4]:
         render_final_four_tab(st.session_state.picks)
 
-    # --- Submit section ---
+    # ── Step 3: Submit ────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### Step 3 — Submit")
 
@@ -362,9 +724,12 @@ def show_submission_form(now):
         if already_in:
             st.info(f"ℹ️ A bracket for **{name.strip()}** already exists — submitting again will replace it.")
 
+        method = st.session_state.method
+        st.caption(f"Bracket strategy: {METHOD_ICONS[method]} {METHOD_LABELS[method]}")
+
         if st.button("🏀 Submit My Bracket", type="primary"):
             try:
-                save_picks(name.strip(), st.session_state.picks)
+                save_picks(name.strip(), st.session_state.picks, method)
                 st.session_state.submitted = True
                 st.rerun()
             except Exception as e:
@@ -542,7 +907,8 @@ def show_leaderboard():
 
     ranked = rank_participants(all_picks, results)
 
-    # Build leaderboard as styled HTML table for better visual control
+    # Build leaderboard as styled HTML table for better visual control.
+    # Method icon appears next to the participant's name as a small badge.
     medal_icons = {1: "🥇", 2: "🥈", 3: "🥉"}
     rows_html = ""
     for rank, entry in enumerate(ranked, start=1):
@@ -557,10 +923,19 @@ def show_leaderboard():
         else:
             bg = "border-left:4px solid #E0D6CC;"
 
+        # Get the method icon; default to custom if not set (old submissions)
+        method_key  = entry.get("method", "custom")
+        method_icon = METHOD_ICONS.get(method_key, "🎨")
+        method_tip  = METHOD_LABELS.get(method_key, "Custom")
+
         rows_html += f"""
         <tr style="font-size:0.95rem; {bg}">
             <td style="padding:10px 12px; font-weight:700;">{medal}</td>
-            <td style="padding:10px 12px; font-weight:600;">{entry['name']}</td>
+            <td style="padding:10px 12px; font-weight:600;">
+                {entry['name']}
+                <span style="font-size:0.75rem; margin-left:4px;"
+                      title="{method_tip}">{method_icon}</span>
+            </td>
             <td style="padding:10px 12px; font-weight:800; color:#E8651A; font-size:1.1rem;">{entry['score']}</td>
             <td style="padding:10px 12px; color:#555;">{entry['correct']}</td>
             <td style="padding:10px 12px; color:#555;">{entry['base_pts']}</td>

@@ -59,16 +59,24 @@ def _ensure_headers(worksheet):
     """If the picks sheet is empty, write the header row.
 
     The header row tells us what each column contains.
-    Format: timestamp | name | g1 | g2 | ... | g63
-    This only runs once, the first time anyone submits a pick.
+    Format: timestamp | name | g1 | g2 | ... | g63 | method
+
+    Also handles migration: if the sheet already has data but is missing
+    the 'method' column (added later), this appends the header to row 1.
+    This only appends a full header row on a brand-new empty sheet.
     """
     existing = worksheet.get_all_values()
     if not existing:
-        headers = ["timestamp", "name"] + GAME_COLUMNS
+        # Brand-new sheet — write complete headers including method
+        headers = ["timestamp", "name"] + GAME_COLUMNS + ["method"]
         worksheet.append_row(headers, value_input_option="RAW")
+    elif "method" not in existing[0]:
+        # Sheet exists but predates the method column — add the header cell
+        next_col = len(existing[0]) + 1
+        worksheet.update_cell(1, next_col, "method")
 
 
-def save_picks(name, picks_dict):
+def save_picks(name, picks_dict, method="custom"):
     """Save a participant's bracket picks as a new row in the picks sheet.
 
     Always appends a new row — the most recent submission per name counts.
@@ -77,15 +85,17 @@ def save_picks(name, picks_dict):
     Args:
         name:       participant's name (string)
         picks_dict: dict of {game_id: picked_team_name} — all 63 games
+        method:     how the bracket was filled ("custom", "seed", "mascot", "random")
     """
     ws = get_worksheet(PICKS_TAB)
     _ensure_headers(ws)
 
-    # Build the row in the correct column order
+    # Build the row in the correct column order, with method appended at the end
     timestamp = datetime.now(timezone.utc).isoformat()
     row = [timestamp, name]
     for game_id in GAME_COLUMNS:
         row.append(picks_dict.get(game_id, ""))  # blank if not picked (shouldn't happen)
+    row.append(method)
 
     ws.append_row(row, value_input_option="RAW")
 
@@ -130,6 +140,8 @@ def get_all_picks():
             "name":      name,
             "timestamp": entry["timestamp"],
             "picks":     picks,
+            # Default to "custom" for old submissions that predate this column
+            "method":    entry["row"].get("method", "custom") or "custom",
         })
 
     return result

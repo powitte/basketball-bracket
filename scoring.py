@@ -179,6 +179,8 @@ def rank_participants(all_picks_list, results):
             "margin_pts": scores["margin_pts"],
             "picks":      entry["picks"],
             "breakdown":  scores["breakdown"],
+            # Pass through the bracket strategy so the leaderboard can display it
+            "method":     entry.get("method", "custom"),
         })
 
     # Sort: highest score first; alphabetical name as tiebreaker
