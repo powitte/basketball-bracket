@@ -1,5 +1,6 @@
 # Streamlit secrets — contains real credentials, never commit this
 .streamlit/secrets.toml
+.streamlit/secrets.toml.template
 
 # Python
 __pycache__/
@@ -10,3 +11,9 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# decomissioning
+teardown.txt
+
+# Local guides — kept off the public repo
+FOR_TRALE.md
