@@ -730,9 +730,14 @@ def show_submission_form(now):
     elif not all_picked:
         st.warning(f"⬆ Complete all 63 picks in Step 2. ({total_games - picks_made} remaining)")
     else:
-        already_in = check_already_submitted(name.strip())
-        if already_in:
-            st.info(f"ℹ️ A bracket for **{name.strip()}** already exists — submitting again will replace it.")
+        # check_already_submitted hits Google Sheets — wrap it so a sheets error
+        # doesn't crash the whole page and wipe the user's session state.
+        try:
+            already_in = check_already_submitted(name.strip())
+            if already_in:
+                st.info(f"ℹ️ A bracket for **{name.strip()}** already exists — submitting again will replace it.")
+        except Exception:
+            already_in = False  # assume not submitted; save_picks will surface any real error
 
         method = st.session_state.method
         st.caption(f"Bracket strategy: {METHOD_ICONS[method]} {METHOD_LABELS[method]}")
