@@ -592,13 +592,6 @@ def show_submission_form(now):
     # --- Success state after submitting ---
     if st.session_state.submitted:
         st.success("✅ Your bracket has been submitted! You're all set.")
-        st.caption("Want to change your picks and resubmit before the deadline? Use the button below — this will clear your current picks.")
-        if st.button("✏️ Clear picks and start over"):
-            st.session_state.submitted = False
-            st.session_state.picks = {}
-            st.session_state.method = "custom"
-            st.session_state.auto_fill_snapshot = None
-            st.rerun()
         return
 
     # --- Scoring rules + bracket image side by side ---
@@ -624,7 +617,7 @@ def show_submission_form(now):
     # ── Step 1.5: Help me pick (optional) ────────────────────────────────────
     st.markdown("### 🤔 Need help? Pick a strategy *(optional)*")
     st.caption(
-        "Choose a strategy and click **Fill my bracket!** to auto-fill all 63 picks instantly. "
+        "Select a strategy to auto-fill all 63 picks instantly. "
         "You can change individual picks afterward — it'll be marked Custom."
     )
 
@@ -645,35 +638,17 @@ def show_submission_form(now):
     chosen_strategy = STRATEGY_OPTIONS[chosen_strategy_label]
 
     if chosen_strategy is not None:
-        # Show a brief description of what this strategy does
-        descriptions = {
-            "seed": (
-                "<b>🌱 Chalk picks:</b> the lower seed always wins through the Final Four. "
-                "The Championship is randomized — at that point, who really knows?"
-            ),
-            "mascot": (
-                "<b>⚔️ Mascot battle:</b> every game is won by the fiercer mascot. "
-                "Wolverines (10/10) devour everything. Quakers (2/10) do not fight. Ties are coin flips."
-            ),
-            "random": (
-                "<b>🎲 Random bracket:</b> every game is a coin flip. "
-                "Statistically indistinguishable from most human bracket strategies."
-            ),
-        }
-        st.markdown(
-            f'<div class="strategy-card">{descriptions[chosen_strategy]}</div>',
-            unsafe_allow_html=True,
-        )
-
-        if st.button("🎯 Fill my bracket!", key="auto_fill_btn"):
-            if chosen_strategy == "seed":
-                new_picks = auto_pick_by_seed()
-            elif chosen_strategy == "mascot":
-                new_picks = auto_pick_by_mascot()
-            else:
-                new_picks = auto_pick_random()
-            apply_auto_picks(new_picks, chosen_strategy)
-            st.rerun()
+        # Auto-fill immediately on selection, then reset the dropdown so it
+        # doesn't re-fire on every subsequent rerun.
+        if chosen_strategy == "seed":
+            new_picks = auto_pick_by_seed()
+        elif chosen_strategy == "mascot":
+            new_picks = auto_pick_by_mascot()
+        else:
+            new_picks = auto_pick_random()
+        apply_auto_picks(new_picks, chosen_strategy)
+        del st.session_state["strategy_dropdown"]  # resets dropdown to default
+        st.rerun()
 
     # Show a status badge if a strategy is currently active
     current_method = st.session_state.method
