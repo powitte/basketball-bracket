@@ -264,6 +264,13 @@ if "method" not in st.session_state:
 if "auto_fill_snapshot" not in st.session_state:
     st.session_state.auto_fill_snapshot = None
 
+# fill_version increments each time the user applies an auto-fill strategy.
+# render_game_picker appends it to every selectbox key, giving each auto-fill
+# a fresh widget key so Streamlit has no stale internal state to restore.
+# (Stale widget state from prior renders overrides index= — new keys don't.)
+if "fill_version" not in st.session_state:
+    st.session_state.fill_version = 0
+
 
 # ---------------------------------------------------------------------------
 # MAIN ROUTING
@@ -508,39 +515,20 @@ def auto_pick_random():
 def apply_auto_picks(new_picks, method):
     """Write auto-generated picks into session state and record the strategy.
 
-    IMPORTANT: we SET each selectbox's widget key to the correct option label
-    string rather than deleting keys and relying on index= re-initialization.
-    In newer Streamlit versions, delete + rerun can fail to reinitialize
-    selectboxes correctly, causing them to revert to index 0 (unpicked).
-    Setting the value directly is reliable across all versions.
+    We increment fill_version so render_game_picker uses a fresh widget key
+    for every selectbox. Fresh keys have no prior Streamlit internal state,
+    so they always initialize from index= (which we compute from the new picks).
 
-    We process rounds in order (1 → 6) so that resolve_teams() calls for
-    later rounds can find their upstream picks already in new_picks.
+    This is more reliable than trying to overwrite existing widget state:
+    Streamlit prefers its own internal widget state over programmatic
+    session_state assignments for widgets that rendered in a prior run —
+    causing R64 selectboxes to ignore the new pick and revert to the
+    matchup placeholder they had on first page load.
     """
-    for round_num in range(1, 7):
-        for game in GAMES:
-            if game["round"] != round_num:
-                continue
-            game_id = game["id"]
-            widget_key = f"pick_{game_id}"
-            picked_team = new_picks.get(game_id)
-            if picked_team:
-                # Compute the label text that render_game_picker will use for this team
-                team_a, seed_a, team_b, seed_b = resolve_teams(game_id, new_picks)
-                if picked_team == team_a:
-                    st.session_state[widget_key] = f"({seed_a}) {team_a}" if seed_a else team_a
-                elif picked_team == team_b:
-                    st.session_state[widget_key] = f"({seed_b}) {team_b}" if seed_b else team_b
-            else:
-                # No pick for this game — clear the widget key if present
-                if widget_key in st.session_state:
-                    del st.session_state[widget_key]
-
     st.session_state.picks = new_picks
-
-    # Save a snapshot so we can detect later if the user manually changed anything
     st.session_state.auto_fill_snapshot = dict(new_picks)
     st.session_state.method = method
+    st.session_state.fill_version += 1  # triggers fresh widget keys on next render
 
 
 # ===========================================================================
@@ -837,11 +825,15 @@ def render_game_picker(game, picks):
     else:
         current_idx = 0
 
+    # Include fill_version in the key so every auto-fill produces fresh widgets.
+    # Fresh keys have no prior Streamlit internal state, so they correctly
+    # initialize from index= rather than showing stale cached values.
+    fv = st.session_state.get("fill_version", 0)
     chosen_label = st.selectbox(
         label=game_id,
         options=options,
         index=current_idx,
-        key=f"pick_{game_id}",
+        key=f"pick_{game_id}_v{fv}",
         label_visibility="collapsed",
     )
 
