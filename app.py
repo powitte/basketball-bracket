@@ -592,7 +592,8 @@ def show_submission_form(now):
     # --- Success state after submitting ---
     if st.session_state.submitted:
         st.success("✅ Your bracket has been submitted! You're all set.")
-        if st.button("Submit a different bracket"):
+        st.caption("Want to change your picks and resubmit before the deadline? Use the button below — this will clear your current picks.")
+        if st.button("✏️ Clear picks and start over"):
             st.session_state.submitted = False
             st.session_state.picks = {}
             st.session_state.method = "custom"
@@ -686,13 +687,17 @@ def show_submission_form(now):
 
     # ── Step 2: Bracket ───────────────────────────────────────────────────────
     total_games = 63
-    st.markdown("### Step 2 — Fill out your bracket")
+    picks_made = sum(1 for v in st.session_state.picks.values() if v)
+    pct = picks_made / total_games
+    st.markdown(f"### Step 2 — Fill out your bracket &nbsp; `{picks_made} / {total_games} picks`")
+    st.progress(pct)
 
-    # Container created here so the progress bar appears above the tabs in the UI.
-    # We populate it AFTER rendering the tabs because each render_game_picker call
-    # writes into st.session_state.picks — counting before rendering gives a stale
-    # total that's always one pick behind.
-    picks_counter = st.container()
+    # When 5 or fewer picks remain, show exactly which game(s) are missing
+    # so the user doesn't have to hunt through every tab to find the last one.
+    if 0 < (total_games - picks_made) <= 5:
+        missing = find_missing_games(st.session_state.picks)
+        if missing:
+            st.info("📍 **Still need to pick:** " + " · ".join(missing))
 
     # --- Bracket tabs ---
     tabs = st.tabs(["🔵 East", "🟠 South", "🔴 West", "🟢 Midwest", "🏆 Final Four"])
@@ -703,20 +708,6 @@ def show_submission_form(now):
 
     with tabs[4]:
         render_final_four_tab(st.session_state.picks)
-
-    # Compute AFTER tabs so all render_game_picker calls have updated st.session_state.picks
-    picks_made = sum(1 for v in st.session_state.picks.values() if v)
-    pct = picks_made / total_games
-
-    with picks_counter:
-        st.markdown(f"`{picks_made} / {total_games} picks`")
-        st.progress(pct)
-        # When 5 or fewer picks remain, show exactly which game(s) are missing
-        # so the user doesn't have to hunt through every tab to find the last one.
-        if 0 < (total_games - picks_made) <= 5:
-            missing = find_missing_games(st.session_state.picks)
-            if missing:
-                st.info("📍 **Still need to pick:** " + " · ".join(missing))
 
     # ── Step 3: Submit ────────────────────────────────────────────────────────
     st.markdown("---")
