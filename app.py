@@ -508,16 +508,33 @@ def auto_pick_random():
 def apply_auto_picks(new_picks, method):
     """Write auto-generated picks into session state and record the strategy.
 
-    IMPORTANT: we also delete the cached Streamlit widget state for every
-    selectbox. Streamlit caches widget values by key; if we only update
-    st.session_state.picks without clearing the widget cache, the selectboxes
-    on screen won't show the new picks — they'll keep showing the old values.
-    Deleting the keys forces each selectbox to reinitialize from the new picks.
+    IMPORTANT: we SET each selectbox's widget key to the correct option label
+    string rather than deleting keys and relying on index= re-initialization.
+    In newer Streamlit versions, delete + rerun can fail to reinitialize
+    selectboxes correctly, causing them to revert to index 0 (unpicked).
+    Setting the value directly is reliable across all versions.
+
+    We process rounds in order (1 → 6) so that resolve_teams() calls for
+    later rounds can find their upstream picks already in new_picks.
     """
-    for game in GAMES:
-        widget_key = f"pick_{game['id']}"
-        if widget_key in st.session_state:
-            del st.session_state[widget_key]
+    for round_num in range(1, 7):
+        for game in GAMES:
+            if game["round"] != round_num:
+                continue
+            game_id = game["id"]
+            widget_key = f"pick_{game_id}"
+            picked_team = new_picks.get(game_id)
+            if picked_team:
+                # Compute the label text that render_game_picker will use for this team
+                team_a, seed_a, team_b, seed_b = resolve_teams(game_id, new_picks)
+                if picked_team == team_a:
+                    st.session_state[widget_key] = f"({seed_a}) {team_a}" if seed_a else team_a
+                elif picked_team == team_b:
+                    st.session_state[widget_key] = f"({seed_b}) {team_b}" if seed_b else team_b
+            else:
+                # No pick for this game — clear the widget key if present
+                if widget_key in st.session_state:
+                    del st.session_state[widget_key]
 
     st.session_state.picks = new_picks
 
