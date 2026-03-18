@@ -56,24 +56,20 @@ def get_worksheet(tab_name):
 
 
 def _ensure_headers(worksheet):
-    """If the picks sheet is empty, write the header row.
+    """Ensure row 1 of the picks sheet contains the correct full header row.
 
-    The header row tells us what each column contains.
-    Format: timestamp | name | g1 | g2 | ... | g63 | method
+    Format: timestamp | name | g1 | g2 | ... | g63 | method  (65 columns)
 
-    Also handles migration: if the sheet already has data but is missing
-    the 'method' column (added later), this appends the header to row 1.
-    This only appends a full header row on a brand-new empty sheet.
+    Overwrites row 1 whenever it doesn't match exactly — handles empty sheets,
+    partial headers from failed prior runs, and missing columns from migration.
+    Data rows (row 2+) are never touched.
     """
+    headers = ["timestamp", "name"] + GAME_COLUMNS + ["method"]
     existing = worksheet.get_all_values()
-    if not existing:
-        # Brand-new sheet — write complete headers including method
-        headers = ["timestamp", "name"] + GAME_COLUMNS + ["method"]
-        worksheet.append_row(headers, value_input_option="RAW")
-    elif "method" not in existing[0]:
-        # Sheet exists but predates the method column — add the header cell
-        next_col = len(existing[0]) + 1
-        worksheet.update_cell(1, next_col, "method")
+    if not existing or existing[0] != headers:
+        # Write the full header row to A1, overwriting whatever is there.
+        # values= takes a list of rows; we pass one row.
+        worksheet.update(values=[headers], range_name="A1")
 
 
 def save_picks(name, picks_dict, method="custom"):
