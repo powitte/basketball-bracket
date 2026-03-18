@@ -643,8 +643,21 @@ def show_submission_form(now):
     chosen_strategy = STRATEGY_OPTIONS[chosen_strategy_label]
 
     if chosen_strategy is not None:
-        # Auto-fill immediately on selection, then reset the dropdown so it
-        # doesn't re-fire on every subsequent rerun.
+        # Auto-fill and continue rendering in this same script execution.
+        #
+        # WHY NO st.rerun(): apply_auto_picks increments fill_version, giving
+        # every bracket selectbox a fresh widget key. If we call st.rerun(),
+        # those fresh keys exist only in session state — Streamlit still has
+        # internal widget state from the page load for the OLD keys, and the
+        # rerun-based initialization of fresh keys from index= has proven
+        # unreliable across Streamlit Cloud versions. By NOT calling st.rerun(),
+        # the bracket renders in the same run as the auto-fill. The fresh keys
+        # (pick_gX_v<new_version>) are definitively brand-new at render time,
+        # so index=current_idx is guaranteed to control the displayed value.
+        #
+        # Side effect: the strategy dropdown stays on the chosen option for
+        # this one render. Deleting the key here means on the next user
+        # interaction it resets to "(I'll fill it myself)".
         if chosen_strategy == "seed":
             new_picks = auto_pick_by_seed()
         elif chosen_strategy == "mascot":
@@ -652,8 +665,7 @@ def show_submission_form(now):
         else:
             new_picks = auto_pick_random()
         apply_auto_picks(new_picks, chosen_strategy)
-        del st.session_state["strategy_dropdown"]  # resets dropdown to default
-        st.rerun()
+        del st.session_state["strategy_dropdown"]  # resets on next interaction
 
     # Show a status badge if a strategy is currently active
     current_method = st.session_state.method
