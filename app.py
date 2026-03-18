@@ -11,7 +11,6 @@
 #   AFTER deadline  → show the leaderboard and completed game results
 # ---------------------------------------------------------------------------
 
-import random
 import streamlit as st
 from datetime import datetime
 import fitz  # PyMuPDF — converts the bracket PDF to a displayable image
@@ -250,27 +249,6 @@ if "picks" not in st.session_state:
 if "submitted" not in st.session_state:
     st.session_state.submitted = False  # True after a successful submission
 
-# method: how the user filled their bracket
-#   "custom"  — filled manually (default), or modified an auto-filled bracket
-#   "seed"    — auto-filled by seed (chalk)
-#   "mascot"  — auto-filled by mascot battle ratings
-#   "random"  — auto-filled by pure coin flip
-if "method" not in st.session_state:
-    st.session_state.method = "custom"
-
-# auto_fill_snapshot: a copy of picks immediately after auto-fill.
-# We compare current picks against this snapshot on every rerun;
-# any difference means the user manually changed something → method = "custom".
-if "auto_fill_snapshot" not in st.session_state:
-    st.session_state.auto_fill_snapshot = None
-
-# fill_version increments each time the user applies an auto-fill strategy.
-# render_game_picker appends it to every selectbox key, giving each auto-fill
-# a fresh widget key so Streamlit has no stale internal state to restore.
-# (Stale widget state from prior renders overrides index= — new keys don't.)
-if "fill_version" not in st.session_state:
-    st.session_state.fill_version = 0
-
 
 # ---------------------------------------------------------------------------
 # MAIN ROUTING
@@ -348,187 +326,11 @@ def render_bracket_image():
 
 
 # ===========================================================================
-# AUTO-PICK STRATEGIES
+# (Auto-pick strategies removed — Streamlit's internal widget state cache
+#  prevented R64 selectboxes from reflecting programmatically-set picks
+#  across multiple Streamlit Cloud versions. Manual picks work reliably.)
 # ===========================================================================
-# Three strategies for automatically filling all 63 game picks.
-# All three process games in round order (1 → 6) so that each round's results
-# are available before the next round tries to resolve its team matchups.
-# They build and return a fresh picks dict without touching session state directly.
 
-# ---------------------------------------------------------------------------
-# MASCOT POWER RATINGS
-# ---------------------------------------------------------------------------
-# Scale 1–10. Higher = wins the hypothetical fight.
-# Used by the "mascot battle" auto-fill strategy. Ties are randomized.
-# Ratings are intentionally a bit opinionated and fun — argue with your bracket.
-MASCOT_POWER = {
-    # ── East ──
-    "Duke":          7,   # Blue Devils — supernatural, but more mischievous than menacing
-    "Siena":         5,   # Saints — holy, but not exactly fighters
-    "Ohio St.":      2,   # Buckeyes — it is literally a nut
-    "TCU":           5,   # Horned Frogs — cool name, still a frog
-    "St. John's":    6,   # Red Storm — weather force counts
-    "N. Iowa":       8,   # Panthers — big cat
-    "Kansas":        5,   # Jayhawks — mythological bird/soldier hybrid
-    "Cal Baptist":   6,   # Lancers — mounted knight with a lance
-    "Louisville":    4,   # Cardinals — small bird
-    "South Florida": 7,   # Bulls — 1,500 lb aggressive animal
-    "Michigan St.":  8,   # Spartans — elite ancient warriors
-    "N. Dakota St.": 7,   # Bison — massive, powerful
-    "UCLA":          8,   # Bruins — bears
-    "UCF":           7,   # Knights — armored warrior
-    "UConn":         6,   # Huskies — tough working sled dog
-    "Furman":        6,   # Paladins — holy knights
-    # ── South ──
-    "Florida":       9,   # Gators — apex predator
-    "PVAM/LEH":      7,   # Panthers/Mountain Hawks — big cat + predatory bird, averaged
-    "Clemson":       9,   # Tigers — apex predator
-    "Iowa":          5,   # Hawkeyes — sharp-eyed human (literary character, not a bird)
-    "Vanderbilt":    5,   # Commodores — naval officer rank
-    "McNeese":       5,   # Cowboys — tough, but still a human
-    "Nebraska":      3,   # Cornhuskers — farmer
-    "Troy":          7,   # Trojans — ancient elite warriors
-    "N. Carolina":   4,   # Tar Heels — Civil War infantry nickname (stubbornness, not ferocity)
-    "VCU":           7,   # Rams — aggressive horned animal
-    "Illinois":      6,   # Illini — tribal warrior
-    "Penn":          2,   # Quakers — literally committed to nonviolence
-    "Saint Mary's":  5,   # Gaels — Celtic/Irish warriors
-    "Texas A&M":     3,   # Aggies — agriculture students
-    "Houston":       9,   # Cougars — apex predator (big cat)
-    "Idaho":         6,   # Vandals — Germanic warriors who sacked Rome
-    # ── West ──
-    "Arizona":       8,   # Wildcats — fierce cat
-    "LIU":           9,   # Sharks — apex ocean predator
-    "Villanova":     8,   # Wildcats — fierce cat
-    "Utah St.":      3,   # Aggies — agriculture students
-    "Wisconsin":     7,   # Badgers — ferocious relative to their size
-    "High Point":    8,   # Panthers — big cat
-    "Arkansas":      8,   # Razorbacks — feral wild boar, notoriously aggressive
-    "Hawaii":        7,   # Warriors — general warrior class
-    "BYU":           9,   # Cougars — apex predator (big cat)
-    "TEX/NCST":      8,   # Longhorns/Wolfpack — large horned bovine / wolf pack
-    "Gonzaga":       6,   # Bulldogs — tough dog
-    "Kennesaw St.":  5,   # Owls — predatory but small
-    "Miami":         7,   # Hurricanes — devastating natural force
-    "Missouri":      9,   # Tigers — apex predator
-    "Purdue":        4,   # Boilermakers — industrial worker
-    "Queens":        5,   # Royals — status, not fighters
-    # ── Midwest ──
-    "Michigan":      10,  # Wolverines — pound for pound the most ferocious animal alive
-    "UMBC/HOW":      5,   # Retrievers/Bison — friendly dog + massive animal, averaged to 5
-    "Georgia":       6,   # Bulldogs — tough dog
-    "Saint Louis":   3,   # Billikens — a small good-luck gnome figurine
-    "Texas Tech":    6,   # Red Raiders — cavalry raiders
-    "Akron":         4,   # Zips — named after a rubber boot brand (Zipper boots)
-    "Alabama":       6,   # Crimson Tide — tidal force
-    "Hofstra":       5,   # Pride — it's the concept of a lion pride, not a lion itself
-    "Tennessee":     5,   # Volunteers — civilian soldiers
-    "M-OH/SMU":      6,   # RedHawks/Mustangs — predatory bird / wild horse, averaged
-    "Virginia":      6,   # Cavaliers — royalist cavalry
-    "Wright St.":    6,   # Raiders — military raiders
-    "Kentucky":      8,   # Wildcats — fierce cat
-    "Santa Clara":   6,   # Broncos — wild horse
-    "Iowa St.":      7,   # Cyclones — destructive weather
-    "Tennessee St.": 9,   # Tigers — apex predator
-}
-
-
-def auto_pick_by_seed():
-    """Fill all 63 games by always picking the better (lower) seed.
-
-    Equal seeds and the Championship game (round 6) are randomized.
-    The user requested random for "the finals" — because at that point
-    any 1-seed can win, and chalk just means everyone ties.
-
-    Processes rounds in order so that each round's picks are ready
-    before the next round's resolve_teams() calls need them.
-
-    Returns a complete picks dict {game_id: team_name}.
-    """
-    picks = {}
-    for round_num in range(1, 7):
-        for game in GAMES:
-            if game["round"] != round_num:
-                continue
-            team_a, seed_a, team_b, seed_b = resolve_teams(game["id"], picks)
-            if not team_a or not team_b:
-                continue  # should not happen in a well-formed bracket
-
-            if game["round"] == 6:
-                # Championship: randomize regardless of seeds
-                picks[game["id"]] = random.choice([team_a, team_b])
-            elif seed_a < seed_b:
-                picks[game["id"]] = team_a   # team_a is the better seed
-            elif seed_b < seed_a:
-                picks[game["id"]] = team_b   # team_b is the better seed
-            else:
-                # Equal seeds (common in later rounds, e.g., two 1-seeds) → coin flip
-                picks[game["id"]] = random.choice([team_a, team_b])
-    return picks
-
-
-def auto_pick_by_mascot():
-    """Fill all 63 games using the MASCOT_POWER fight ratings above.
-
-    Higher power wins. Ties are randomized.
-    Returns a complete picks dict {game_id: team_name}.
-    """
-    picks = {}
-    for round_num in range(1, 7):
-        for game in GAMES:
-            if game["round"] != round_num:
-                continue
-            team_a, seed_a, team_b, seed_b = resolve_teams(game["id"], picks)
-            if not team_a or not team_b:
-                continue
-
-            power_a = MASCOT_POWER.get(team_a, 5)  # default 5 if team somehow not in dict
-            power_b = MASCOT_POWER.get(team_b, 5)
-
-            if power_a > power_b:
-                picks[game["id"]] = team_a
-            elif power_b > power_a:
-                picks[game["id"]] = team_b
-            else:
-                # Equal mascot power → coin flip
-                picks[game["id"]] = random.choice([team_a, team_b])
-    return picks
-
-
-def auto_pick_random():
-    """Fill all 63 games by random coin flip.
-
-    Returns a complete picks dict {game_id: team_name}.
-    """
-    picks = {}
-    for round_num in range(1, 7):
-        for game in GAMES:
-            if game["round"] != round_num:
-                continue
-            team_a, seed_a, team_b, seed_b = resolve_teams(game["id"], picks)
-            if not team_a or not team_b:
-                continue
-            picks[game["id"]] = random.choice([team_a, team_b])
-    return picks
-
-
-def apply_auto_picks(new_picks, method):
-    """Write auto-generated picks into session state and record the strategy.
-
-    We increment fill_version so render_game_picker uses a fresh widget key
-    for every selectbox. Fresh keys have no prior Streamlit internal state,
-    so they always initialize from index= (which we compute from the new picks).
-
-    This is more reliable than trying to overwrite existing widget state:
-    Streamlit prefers its own internal widget state over programmatic
-    session_state assignments for widgets that rendered in a prior run —
-    causing R64 selectboxes to ignore the new pick and revert to the
-    matchup placeholder they had on first page load.
-    """
-    st.session_state.picks = new_picks
-    st.session_state.auto_fill_snapshot = dict(new_picks)
-    st.session_state.method = method
-    st.session_state.fill_version += 1  # triggers fresh widget keys on next render
 
 
 # ===========================================================================
@@ -574,14 +376,6 @@ METHOD_LABELS = {"custom": "Custom", "seed": "By seed", "mascot": "Mascot battle
 def show_submission_form(now):
     """Show the bracket pick form before the submission deadline."""
 
-    # --- Detect manual edits after auto-fill ---
-    # If picks have diverged from the auto-fill snapshot, mark method as custom.
-    # This runs at the top of every rerun so it always reflects the latest state.
-    snapshot = st.session_state.auto_fill_snapshot
-    if snapshot is not None and st.session_state.picks != snapshot:
-        st.session_state.method = "custom"
-        st.session_state.auto_fill_snapshot = None
-
     # --- Countdown banner ---
     time_left = SUBMISSION_DEADLINE - now
     hours, remainder = divmod(int(time_left.total_seconds()), 3600)
@@ -619,77 +413,15 @@ def show_submission_form(now):
 
     st.markdown("---")
 
-    # ── Step 1.5: Help me pick (optional) ────────────────────────────────────
-    st.markdown("### 🤔 Need help? Pick a strategy *(optional)*")
-    st.caption(
-        "Select a strategy to auto-fill all 63 picks instantly. "
-        "You can change individual picks afterward — it'll be marked Custom."
-    )
-
-    # Map display label → internal method key (None = no auto-fill)
-    STRATEGY_OPTIONS = {
-        "(I'll fill it myself)":                        None,
-        "🌱 By seed — chalk, always pick the favorite": "seed",
-        "⚔️ Mascot battle — fiercer mascot wins":       "mascot",
-        "🎲 Random — pure coin flip, no regrets":        "random",
-    }
-
-    chosen_strategy_label = st.selectbox(
-        "Pick a strategy",
-        options=list(STRATEGY_OPTIONS.keys()),
-        key="strategy_dropdown",
-        label_visibility="collapsed",
-    )
-    chosen_strategy = STRATEGY_OPTIONS[chosen_strategy_label]
-
-    if chosen_strategy is not None:
-        # Auto-fill and continue rendering in this same script execution.
-        #
-        # WHY NO st.rerun(): apply_auto_picks increments fill_version, giving
-        # every bracket selectbox a fresh widget key. If we call st.rerun(),
-        # those fresh keys exist only in session state — Streamlit still has
-        # internal widget state from the page load for the OLD keys, and the
-        # rerun-based initialization of fresh keys from index= has proven
-        # unreliable across Streamlit Cloud versions. By NOT calling st.rerun(),
-        # the bracket renders in the same run as the auto-fill. The fresh keys
-        # (pick_gX_v<new_version>) are definitively brand-new at render time,
-        # so index=current_idx is guaranteed to control the displayed value.
-        #
-        # Side effect: the strategy dropdown stays on the chosen option for
-        # this one render. Deleting the key here means on the next user
-        # interaction it resets to "(I'll fill it myself)".
-        if chosen_strategy == "seed":
-            new_picks = auto_pick_by_seed()
-        elif chosen_strategy == "mascot":
-            new_picks = auto_pick_by_mascot()
-        else:
-            new_picks = auto_pick_random()
-        apply_auto_picks(new_picks, chosen_strategy)
-        del st.session_state["strategy_dropdown"]  # resets on next interaction
-
-    # Show a status badge if a strategy is currently active
-    current_method = st.session_state.method
-    if current_method != "custom":
-        st.success(
-            f"{METHOD_ICONS[current_method]} Bracket filled using "
-            f"**{METHOD_LABELS[current_method]}**. Change any pick to go Custom."
-        )
-
-    st.markdown("---")
-
     # ── Step 2: Bracket ───────────────────────────────────────────────────────
     total_games = 63
-    picks_made = sum(1 for v in st.session_state.picks.values() if v)
-    pct = picks_made / total_games
-    st.markdown(f"### Step 2 — Fill out your bracket &nbsp; `{picks_made} / {total_games} picks`")
-    st.progress(pct)
 
-    # When 5 or fewer picks remain, show exactly which game(s) are missing
-    # so the user doesn't have to hunt through every tab to find the last one.
-    if 0 < (total_games - picks_made) <= 5:
-        missing = find_missing_games(st.session_state.picks)
-        if missing:
-            st.info("📍 **Still need to pick:** " + " · ".join(missing))
+    # Counter placeholder — populated AFTER the bracket renders so it reflects
+    # picks made during this run (render_game_picker updates picks in place).
+    # This fixes the "last pick one-behind" bug: without this, a user who picks
+    # the championship and immediately clicks Submit would see "1 remaining"
+    # because the championship pick hadn't been counted at the top of the run.
+    counter_slot = st.container()
 
     # --- Bracket tabs ---
     tabs = st.tabs(["🔵 East", "🟠 South", "🔴 West", "🟢 Midwest", "🏆 Final Four"])
@@ -700,6 +432,19 @@ def show_submission_form(now):
 
     with tabs[4]:
         render_final_four_tab(st.session_state.picks)
+
+    # Recount now that render_game_picker has processed all bracket interactions.
+    picks_made = sum(1 for v in st.session_state.picks.values() if v)
+    pct = picks_made / total_games
+
+    with counter_slot:
+        st.markdown(f"### Step 2 — Fill out your bracket &nbsp; `{picks_made} / {total_games} picks`")
+        st.progress(pct)
+        # When 5 or fewer picks remain, name the specific game(s) still missing.
+        if 0 < (total_games - picks_made) <= 5:
+            missing = find_missing_games(st.session_state.picks)
+            if missing:
+                st.info("📍 **Still need to pick:** " + " · ".join(missing))
 
     # ── Step 3: Submit ────────────────────────────────────────────────────────
     st.markdown("---")
@@ -722,12 +467,9 @@ def show_submission_form(now):
         except Exception:
             already_in = False  # assume not submitted; save_picks will surface any real error
 
-        method = st.session_state.method
-        st.caption(f"Bracket strategy: {METHOD_ICONS[method]} {METHOD_LABELS[method]}")
-
         if st.button("🏀 Submit My Bracket", type="primary"):
             try:
-                save_picks(name.strip(), st.session_state.picks, method)
+                save_picks(name.strip(), st.session_state.picks, "custom")
                 st.session_state.submitted = True
                 st.rerun()
             except Exception as e:
@@ -837,15 +579,11 @@ def render_game_picker(game, picks):
     else:
         current_idx = 0
 
-    # Include fill_version in the key so every auto-fill produces fresh widgets.
-    # Fresh keys have no prior Streamlit internal state, so they correctly
-    # initialize from index= rather than showing stale cached values.
-    fv = st.session_state.get("fill_version", 0)
     chosen_label = st.selectbox(
         label=game_id,
         options=options,
         index=current_idx,
-        key=f"pick_{game_id}_v{fv}",
+        key=f"pick_{game_id}",
         label_visibility="collapsed",
     )
 
