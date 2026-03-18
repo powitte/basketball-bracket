@@ -17,3 +17,6 @@ teardown.txt
 
 # Local guides — kept off the public repo
 FOR_TRALE.md
+
+# Local dev/test scripts — not part of the app
+test_leaderboard.py
