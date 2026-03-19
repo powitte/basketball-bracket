@@ -684,7 +684,9 @@ def show_leaderboard():
         </tr>
         """
 
-    st.markdown(f"""
+    # st.html() renders raw HTML directly — avoids the markdown processor
+    # mangling large HTML tables and displaying them as raw code blocks.
+    st.html(f"""
     <table style="width:100%; border-collapse:collapse; background:white;
                   border-radius:10px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
         <thead>
@@ -700,7 +702,7 @@ def show_leaderboard():
         </thead>
         <tbody>{rows_html}</tbody>
     </table>
-    """, unsafe_allow_html=True)
+    """)
 
     # --- Completed game results ---
     st.markdown("---")
@@ -713,18 +715,21 @@ def show_leaderboard():
     for result in results:
         seed_w = TEAM_SEEDS.get(result["winner"], "?")
         seed_l = TEAM_SEEDS.get(result["loser"], "?")
+        # Use original ESPN names for display; fall back to bracket name if not present.
+        # This prevents First Four games from showing "TEX/NCST def. TEX/NCST".
+        display_w = result.get("display_winner", result["winner"])
+        display_l = result.get("display_loser",  result["loser"])
         upset_tag = ""
         if seed_w > seed_l:
             upset_tag = " 🔥 <em>upset</em>"
-        st.markdown(
+        st.html(
             f'<div class="game-result">'
-            f'<span style="font-weight:700; color:#1B3A6B;">({seed_w}) {result["winner"]}</span>'
+            f'<span style="font-weight:700; color:#1B3A6B;">({seed_w}) {display_w}</span>'
             f'<span style="background:#E8651A; color:white; border-radius:4px; padding:2px 8px; font-weight:700;">'
             f'{result["winner_score"]} – {result["loser_score"]}</span>'
-            f'<span style="color:#7A6F68;">def. ({seed_l}) {result["loser"]}</span>'
+            f'<span style="color:#7A6F68;">def. ({seed_l}) {display_l}</span>'
             f'{upset_tag}'
-            f'</div>',
-            unsafe_allow_html=True,
+            f'</div>'
         )
 
 

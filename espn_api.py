@@ -215,7 +215,8 @@ def _fetch_results():
                     score = int(comp.get("score", 0))
                 except (ValueError, TypeError):
                     score = 0
-                parsed.append({"name": bracket_name, "score": score})
+                # Keep the original ESPN name so First Four display shows actual teams
+                parsed.append({"name": bracket_name, "espn_name": espn_name, "score": score})
 
             # Both teams must be recognized; skip if either is unknown
             if not parsed[0]["name"] or not parsed[1]["name"]:
@@ -229,11 +230,15 @@ def _fetch_results():
 
             margin = winner["score"] - loser["score"]
             results.append({
-                "winner":       winner["name"],
-                "loser":        loser["name"],
-                "winner_score": winner["score"],
-                "loser_score":  loser["score"],
-                "margin":       margin,
+                "winner":         winner["name"],
+                "loser":          loser["name"],
+                "winner_score":   winner["score"],
+                "loser_score":    loser["score"],
+                "margin":         margin,
+                # Original ESPN names — used for display so First Four games
+                # show "Texas def. NC State" instead of "TEX/NCST def. TEX/NCST"
+                "display_winner": winner["espn_name"],
+                "display_loser":  loser["espn_name"],
             })
 
     return results
