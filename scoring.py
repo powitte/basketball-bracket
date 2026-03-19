@@ -146,8 +146,98 @@ def calculate_scores(participant_picks, results):
         if score["correct"]:
             totals["correct"] += 1
 
+    # Count correct picks per round — used for the round-by-round leaderboard columns.
+    # round_correct is a dict like {1: 6, 2: 3} meaning 6 correct R64, 3 correct R32, etc.
+    round_correct = {}
+    for game_id, s in breakdown.items():
+        if s["correct"]:
+            game = GAME_BY_ID.get(game_id)
+            if game:
+                r = game["round"]
+                round_correct[r] = round_correct.get(r, 0) + 1
+
+    totals["round_correct"] = round_correct
     totals["breakdown"] = breakdown
     return totals
+
+
+def compute_expected_score(picks, results):
+    """Estimate remaining expected points for one participant.
+
+    Methodology (per user spec):
+      - Each team has a 50% chance of winning each future game.
+      - Each correct pick earns an average of 16 points (base + bonuses).
+      - If a participant's picked team has been eliminated, that pick is worth 0.
+      - If a game has already been decided, it's already reflected in current score
+        and is excluded here.
+
+    Algorithm:
+      For each future pick (game not yet decided):
+        games_needed = round_number_of_pick - rounds_the_team_has_already_won
+        expected_pts = 16 * (0.5 ** games_needed)
+
+    Returns total expected additional points as a float.
+    """
+    # Build team status from ESPN results:
+    #   wins_by_team: how many bracket rounds each team has won (0 = not yet played)
+    #   eliminated:   teams that lost a game (can't earn future points)
+    #
+    # First Four games have result["winner"] == result["loser"] (both map to the
+    # same combined slot name like "TEX/NCST") — we skip those because participants
+    # don't pick First Four games, and the First Four win isn't a scored bracket round.
+    wins_by_team = {}
+    eliminated = set()
+    for result in results:
+        if result["winner"] == result["loser"]:
+            continue  # First Four game — skip
+        wins_by_team[result["winner"]] = wins_by_team.get(result["winner"], 0) + 1
+        eliminated.add(result["loser"])
+
+    expected = 0.0
+    for game_id, picked_team in picks.items():
+        if not picked_team:
+            continue
+        game = GAME_BY_ID.get(game_id)
+        if not game:
+            continue
+        round_num = game["round"]
+
+        if picked_team in eliminated:
+            continue  # Team is out — zero expected points
+
+        wins = wins_by_team.get(picked_team, 0)
+
+        if wins >= round_num:
+            # Team already won this round — game is decided, in current score already
+            continue
+
+        # Team is still alive and this game hasn't been played yet.
+        # They need (round_num - wins) more wins to fulfill this pick.
+        games_needed = round_num - wins
+        expected += 16.0 * (0.5 ** games_needed)
+
+    return expected
+
+
+def compute_win_probabilities(ranked):
+    """Convert current + expected scores into win probabilities summing to 100%.
+
+    Weight = current_score + expected_score + 1
+    The +1 baseline keeps all probabilities non-zero (before any games,
+    everyone has equal expected scores so the result is 1/n for each).
+
+    Returns a list of floats (percentages, 1 decimal place) in ranked order.
+    The list is adjusted so the values sum to exactly 100.0.
+    """
+    weights = [max(e["score"] + e.get("expected_score", 0.0), 0.0) + 1 for e in ranked]
+    total = sum(weights)
+    raw = [w / total * 100 for w in weights]
+    rounded = [round(p, 1) for p in raw]
+    # Fix floating-point rounding so the total is exactly 100.0
+    diff = round(100.0 - sum(rounded), 1)
+    if rounded:
+        rounded[0] = round(rounded[0] + diff, 1)
+    return rounded
 
 
 def rank_participants(all_picks_list, results):
@@ -170,17 +260,20 @@ def rank_participants(all_picks_list, results):
     ranked = []
     for entry in all_picks_list:
         scores = calculate_scores(entry["picks"], results)
+        expected = compute_expected_score(entry["picks"], results)
         ranked.append({
-            "name":       entry["name"],
-            "score":      scores["total"],
-            "correct":    scores["correct"],
-            "base_pts":   scores["base_pts"],
-            "upset_pts":  scores["upset_pts"],
-            "margin_pts": scores["margin_pts"],
-            "picks":      entry["picks"],
-            "breakdown":  scores["breakdown"],
+            "name":           entry["name"],
+            "score":          scores["total"],
+            "correct":        scores["correct"],
+            "base_pts":       scores["base_pts"],
+            "upset_pts":      scores["upset_pts"],
+            "margin_pts":     scores["margin_pts"],
+            "round_correct":  scores["round_correct"],
+            "expected_score": expected,
+            "picks":          entry["picks"],
+            "breakdown":      scores["breakdown"],
             # Pass through the bracket strategy so the leaderboard can display it
-            "method":     entry.get("method", "custom"),
+            "method":         entry.get("method", "custom"),
         })
 
     # Sort: highest score first; alphabetical name as tiebreaker

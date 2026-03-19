@@ -21,7 +21,7 @@ from bracket_data import (
     get_region_games, resolve_teams,
 )
 from espn_api import get_tournament_results
-from scoring import rank_participants
+from scoring import rank_participants, compute_win_probabilities
 from sheets import save_picks, get_all_picks, check_already_submitted
 
 
@@ -646,14 +646,74 @@ def show_leaderboard():
         return
 
     ranked = rank_participants(all_picks, results)
+    win_pcts = compute_win_probabilities(ranked)
 
-    # Build leaderboard as styled HTML table for better visual control.
-    # Method icon appears next to the participant's name as a small badge.
+    # ── Win probability callout (top 3) ──────────────────────────────────────
+    # Shows each of the top 3 players' win probability prominently above the table.
+    # Probability is based on current score + expected remaining points, where
+    # each remaining alive pick is worth 16 × 0.5^(games_still_needed).
+    top_n = min(3, len(ranked))
+    medal_styles = [
+        ("rgba(245,197,24,0.18)",  "#F5C518"),
+        ("rgba(168,169,173,0.15)", "#A8A9AD"),
+        ("rgba(205,127,50,0.15)",  "#CD7F32"),
+    ]
+    medal_labels = ["🥇", "🥈", "🥉"]
+    cards_html = ""
+    for i in range(top_n):
+        bg_col, border_col = medal_styles[i]
+        e   = ranked[i]
+        pct = win_pcts[i]
+        cards_html += f"""
+        <div style="flex:1; min-width:130px; max-width:190px;
+                    background:{bg_col}; border:1px solid {border_col};
+                    border-radius:10px; padding:12px 16px; text-align:center;">
+            <div style="font-size:1.1rem; margin-bottom:3px;">{medal_labels[i]}</div>
+            <div style="font-weight:700; font-size:0.9rem; color:#1B3A6B;
+                        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+                {e['name']}
+            </div>
+            <div style="font-size:1.9rem; font-weight:900; color:#E8651A; line-height:1.2;">
+                {pct}%
+            </div>
+            <div style="font-size:0.62rem; letter-spacing:0.5px; color:#888; margin-top:2px;">
+                WIN PROBABILITY
+            </div>
+        </div>"""
+
+    st.html(f"""
+    <style>:root {{ color-scheme: light; }}</style>
+    <div style="display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap; align-items:stretch;">
+        {cards_html}
+        <div style="flex:2; min-width:200px; background:#f8f5f0; border:1px solid #E0D6CC;
+                    border-radius:10px; padding:14px 18px; font-size:0.8rem; color:#7A6F68;
+                    display:flex; align-items:center; line-height:1.6;">
+            <span>
+                📊 <strong style="color:#1B3A6B;">How win % is calculated:</strong>
+                each remaining pick scores an average of 16 pts if correct, with a 50%
+                chance per game. Picks whose team was eliminated are worth 0.
+                Everyone starts equal; probabilities shift as teams are knocked out.
+            </span>
+        </div>
+    </div>
+    """)
+
+    # ── Leaderboard table ─────────────────────────────────────────────────────
     medal_icons = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+    # Round columns: (round_number, header_abbreviation, full_name_for_tooltip)
+    round_cols = [
+        (1, "R64", "Round of 64"),
+        (2, "R32", "Round of 32"),
+        (3, "S16", "Sweet 16"),
+        (4, "E8",  "Elite 8"),
+        (5, "FF",  "Final Four"),
+        (6, "🏆",  "Championship"),
+    ]
+
     rows_html = ""
-    for rank, entry in enumerate(ranked, start=1):
+    for rank, (entry, win_pct) in enumerate(zip(ranked, win_pcts), start=1):
         medal = medal_icons.get(rank, f"#{rank}")
-        bg = ""
         if rank == 1:
             bg = "background:rgba(245,197,24,0.12); border-left:4px solid #F5C518;"
         elif rank == 2:
@@ -663,41 +723,75 @@ def show_leaderboard():
         else:
             bg = "border-left:4px solid #E0D6CC;"
 
-        # Get the method icon; default to custom if not set (old submissions)
         method_key  = entry.get("method", "custom")
         method_icon = METHOD_ICONS.get(method_key, "🎨")
         method_tip  = METHOD_LABELS.get(method_key, "Custom")
 
+        # Round-by-round correct pick counts (0 if that round hasn't been played)
+        rc = entry.get("round_correct", {})
+        round_cells = "".join(
+            f'<td style="padding:7px 5px; text-align:center; color:#555; font-size:0.85rem;">'
+            f'{rc.get(r, 0)}</td>'
+            for r, _, _ in round_cols
+        )
+
+        # Win% cell: percentage + small orange progress bar
+        bar_w = min(win_pct, 100)
+        win_cell = (
+            f'<div style="font-size:0.88rem; font-weight:700; color:#E8651A;">{win_pct}%</div>'
+            f'<div style="background:#f0ebe4; border-radius:3px; height:4px; '
+            f'            width:54px; margin:3px auto 0;">'
+            f'  <div style="background:#E8651A; height:4px; border-radius:3px; '
+            f'              width:{bar_w}%;"></div>'
+            f'</div>'
+        )
+
         rows_html += f"""
-        <tr style="font-size:0.95rem; {bg}">
-            <td style="padding:10px 12px; font-weight:700;">{medal}</td>
-            <td style="padding:10px 12px; font-weight:600;">
+        <tr style="font-size:0.88rem; {bg}">
+            <td style="padding:8px 6px; text-align:center; font-weight:700; color:#1E1E1E;">{medal}</td>
+            <td style="padding:8px 8px; font-weight:600; color:#1E1E1E; max-width:145px;
+                       white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                 {entry['name']}
-                <span style="font-size:0.75rem; margin-left:4px;"
+                <span style="font-size:0.7rem; margin-left:3px; color:#888;"
                       title="{method_tip}">{method_icon}</span>
             </td>
-            <td style="padding:10px 12px; font-weight:800; color:#E8651A; font-size:1.1rem;">{entry['score']}</td>
-            <td style="padding:10px 12px; color:#555;">{entry['correct']}</td>
-            <td style="padding:10px 12px; color:#555;">{entry['base_pts']}</td>
-            <td style="padding:10px 12px; color:#555;">{entry['upset_pts']}</td>
-            <td style="padding:10px 12px; color:#555;">{entry['margin_pts']}</td>
-        </tr>
-        """
+            <td style="padding:8px 6px; text-align:center;">{win_cell}</td>
+            <td style="padding:8px 6px; text-align:center; font-weight:800;
+                       color:#E8651A; font-size:1.05rem;">{entry['score']}</td>
+            <td style="padding:8px 6px; text-align:center; color:#555;">{entry['correct']}</td>
+            {round_cells}
+            <td style="padding:8px 6px; text-align:center; color:#555;">{entry['base_pts']}</td>
+            <td style="padding:8px 6px; text-align:center; color:#555;">{entry['upset_pts']}</td>
+            <td style="padding:8px 6px; text-align:center; color:#555;">{entry['margin_pts']}</td>
+        </tr>"""
+
+    # Build round-column header cells
+    round_header_cells = "".join(
+        f'<th style="padding:9px 5px; text-align:center;" title="{full}">{abbr}</th>'
+        for _, abbr, full in round_cols
+    )
 
     # st.html() renders raw HTML directly — avoids the markdown processor
     # mangling large HTML tables and displaying them as raw code blocks.
+    # color-scheme: light forces the iframe out of dark mode on Chromebooks.
     st.html(f"""
+    <style>:root {{ color-scheme: light; }}</style>
     <table style="width:100%; border-collapse:collapse; background:white;
-                  border-radius:10px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+                  border-radius:10px; overflow:hidden;
+                  box-shadow:0 2px 8px rgba(0,0,0,0.08); table-layout:auto;">
         <thead>
-            <tr style="background:#1B3A6B; color:white; font-size:0.8rem; text-transform:uppercase; letter-spacing:0.5px;">
-                <th style="padding:12px;">Rank</th>
-                <th style="padding:12px; text-align:left;">Name</th>
-                <th style="padding:12px;">Total</th>
-                <th style="padding:12px;">Correct</th>
-                <th style="padding:12px;">Base</th>
-                <th style="padding:12px;">Upset</th>
-                <th style="padding:12px;">Margin</th>
+            <tr style="background:#1B3A6B; color:white; font-size:0.72rem;
+                       text-transform:uppercase; letter-spacing:0.4px;
+                       border-bottom:2px solid rgba(255,255,255,0.15);">
+                <th style="padding:9px 6px; text-align:center;">Rank</th>
+                <th style="padding:9px 8px; text-align:left;">Name</th>
+                <th style="padding:9px 6px; text-align:center;">Win&nbsp;%</th>
+                <th style="padding:9px 6px; text-align:center;">Total<br>Points</th>
+                <th style="padding:9px 6px; text-align:center;">#<br>Correct</th>
+                {round_header_cells}
+                <th style="padding:9px 6px; text-align:center;">Base<br>Points</th>
+                <th style="padding:9px 6px; text-align:center;">Upset<br>Bonus</th>
+                <th style="padding:9px 6px; text-align:center;">Margin<br>Bonus</th>
             </tr>
         </thead>
         <tbody>{rows_html}</tbody>
@@ -723,6 +817,7 @@ def show_leaderboard():
         if seed_w > seed_l:
             upset_tag = " 🔥 <em>upset</em>"
         st.html(
+            f'<style>:root{{color-scheme:light;}}</style>'
             f'<div class="game-result">'
             f'<span style="font-weight:700; color:#1B3A6B;">({seed_w}) {display_w}</span>'
             f'<span style="background:#E8651A; color:white; border-radius:4px; padding:2px 8px; font-weight:700;">'
