@@ -673,7 +673,7 @@ def show_leaderboard():
         return
 
     ranked = rank_participants(all_picks, results)
-    win_pcts = compute_win_probabilities(ranked)
+    win_pcts = compute_win_probabilities(ranked, results)
 
     # ── Win probability callout (top 3) ──────────────────────────────────────
     # Shows each of the top 3 players' win probability prominently above the table.

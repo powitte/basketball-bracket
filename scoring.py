@@ -257,21 +257,95 @@ def compute_expected_score(picks, results):
     return expected
 
 
-def compute_win_probabilities(ranked):
-    """Convert current + expected scores into win probabilities summing to 100%.
+def compute_win_probabilities(ranked, results):
+    """Calculate the probability each participant wins the pool.
 
-    Weight = current_score + expected_score + 1
-    The +1 baseline keeps all probabilities non-zero (before any games,
-    everyone has equal expected scores so the result is 1/n for each).
+    Strategy: enumerate every possible outcome for games that are still undecided
+    but whose matchup is already determined. For each scenario, score everyone
+    and award the win to whoever finishes first (ties split evenly).
+    Win probability = fraction of scenarios where you come out on top.
 
-    Returns a list of floats (percentages, 1 decimal place) in ranked order.
-    The list is adjusted so the values sum to exactly 100.0.
+    This gives 0% to anyone who can't possibly catch the leader — which the old
+    proportional method couldn't do because it added a +1 floor to everyone.
+
+    Falls back to a score-proportional estimate when there are too many remaining
+    games to enumerate (> 20 games = > 1 million scenarios), which only happens
+    in early rounds before the Sweet 16.
+
+    Args:
+        ranked:  list of participant dicts from rank_participants()
+        results: list of completed game result dicts from espn_api
     """
-    weights = [max(e["score"] + e.get("expected_score", 0.0), 0.0) + 1 for e in ranked]
-    total = sum(weights)
-    raw = [w / total * 100 for w in weights]
+    # Determine what the actual bracket looks like right now
+    actual = build_actual_bracket(results)
+
+    # Find games that are undecided but whose matchup is already determined:
+    # round 1 teams are always known; later rounds need both source games done.
+    remaining = []
+    for game in GAMES:
+        gid = game["id"]
+        if gid in actual:
+            continue  # already played
+        if game["round"] == 1:
+            team_a, team_b = game["team_a"], game["team_b"]
+        else:
+            src_a = actual.get(game["source_a"])
+            src_b = actual.get(game["source_b"])
+            if not src_a or not src_b:
+                continue  # matchup not yet settled (earlier game still to play)
+            team_a = src_a["winner"]
+            team_b = src_b["winner"]
+        remaining.append((gid, team_a, team_b))
+
+    n = len(remaining)
+
+    # --- Fallback for early rounds (too many scenarios to enumerate) ---
+    # Once we're past R64 there are at most 16 undecided games → 65,536 scenarios,
+    # which runs in well under a second. R64 itself has 32 undecided → 4 billion → skip.
+    if n > 20:
+        weights = [max(e["score"] + e.get("expected_score", 0.0), 0.0) + 1 for e in ranked]
+        total_w = sum(weights)
+        raw = [w / total_w * 100 for w in weights]
+        rounded = [round(p, 1) for p in raw]
+        diff = round(100.0 - sum(rounded), 1)
+        if rounded:
+            rounded[0] = round(rounded[0] + diff, 1)
+        return rounded
+
+    # --- Enumerate all 2^n outcome scenarios ---
+    base_scores = [e["score"] for e in ranked]
+    scenario_wins = [0.0] * len(ranked)
+
+    for mask in range(2 ** n):
+        scores = list(base_scores)
+
+        for bit, (gid, team_a, team_b) in enumerate(remaining):
+            # bit=0 → team_a wins, bit=1 → team_b wins
+            winner = team_b if (mask >> bit) & 1 else team_a
+            loser  = team_a if winner == team_b else team_b
+
+            # Points for a correct pick: base + upset bonus + expected margin bonus.
+            # Upset bonus is deterministic (seeds are fixed); margin bonus uses the
+            # tournament average (~10-pt margin → +5) as a stand-in.
+            winner_seed = TEAM_SEEDS.get(winner, 0)
+            loser_seed  = TEAM_SEEDS.get(loser, 0)
+            upset_pts = UPSET_BONUS_PTS if winner_seed > loser_seed else 0
+            pts = POINTS_PER_WIN + upset_pts + 5
+
+            for i, entry in enumerate(ranked):
+                if entry["picks"].get(gid) == winner:
+                    scores[i] += pts
+
+        # Award the scenario win; split equally among tied leaders
+        best = max(scores)
+        winners_idx = [i for i, s in enumerate(scores) if s == best]
+        share = 1.0 / len(winners_idx)
+        for i in winners_idx:
+            scenario_wins[i] += share
+
+    total = sum(scenario_wins) or 1  # guard against empty (shouldn't happen)
+    raw = [w / total * 100 for w in scenario_wins]
     rounded = [round(p, 1) for p in raw]
-    # Fix floating-point rounding so the total is exactly 100.0
     diff = round(100.0 - sum(rounded), 1)
     if rounded:
         rounded[0] = round(rounded[0] + diff, 1)
