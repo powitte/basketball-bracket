@@ -620,6 +620,33 @@ def show_leaderboard():
 
     st.markdown("Submissions are closed. Good luck everyone! 🏀")
 
+    # Bug fix notice — shown prominently so everyone knows scores were recalculated
+    st.html("""
+    <style>:root { color-scheme: light; }</style>
+    <div style="background:#FFF8E1; border:2px solid #F5C518; border-radius:10px;
+                padding:16px 20px; margin-bottom:16px;">
+        <div style="font-size:1rem; font-weight:800; color:#1B3A6B; margin-bottom:6px;">
+            🛠️ Scores just got an update — here's what happened
+        </div>
+        <div style="font-size:0.88rem; color:#333; line-height:1.6;">
+            <strong>The bug:</strong> The app had a glitch where it was only giving you points
+            for a game if you also correctly predicted <em>both teams</em> that made it to that game.
+            So if you got even one earlier pick wrong — like picking the wrong team to make the
+            Elite 8 — the app wouldn't count your points even if you correctly picked the
+            <em>winner</em> of that game.
+            <br><br>
+            <strong>What got hit:</strong> Elite 8 and Final Four picks were most affected,
+            because by those rounds it's pretty likely at least one of your earlier picks
+            was off. Earlier rounds (Round of 64, Round of 32) were basically fine.
+            <br><br>
+            <strong>It's fixed now.</strong> The app now scores each game correctly —
+            you get credit for picking the right winner, no matter what you picked
+            for the earlier rounds that got them there. All scores on this page
+            are accurate. 🎉
+        </div>
+    </div>
+    """)
+
     # Scoring rules reminder at the top of the leaderboard too
     with st.expander("📋 Scoring rules", expanded=False):
         render_scoring_rules()

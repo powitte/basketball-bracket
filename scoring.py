@@ -12,7 +12,7 @@
 # ---------------------------------------------------------------------------
 
 from config import POINTS_PER_WIN, UPSET_BONUS_PTS, MARGIN_BONUS_DIVISOR
-from bracket_data import GAME_BY_ID, TEAM_SEEDS, resolve_teams
+from bracket_data import GAMES, GAME_BY_ID, TEAM_SEEDS
 
 
 def get_team_seed(team_name):
@@ -87,6 +87,43 @@ def build_results_lookup(results):
     return lookup
 
 
+def build_actual_bracket(results):
+    """Walk the bracket game tree using real ESPN results to determine who actually
+    played (and who won) in each game slot (g1–g63).
+
+    This is needed because for rounds 2+, you can't know the actual matchup from
+    bracket_data.py alone — it depends on who won the prior games. We follow the
+    game tree starting from round 1 (where teams are fixed) and propagate forward.
+
+    Returns a dict: {game_id: result_dict} where result_dict has winner, loser,
+    winner_score, loser_score (same shape as ESPN result entries).
+    """
+    results_by_pair = build_results_lookup(results)
+    actual = {}
+
+    # GAMES is ordered round 1 → round 6, so processing in-order is safe —
+    # each game's sources will already be resolved before we reach it.
+    for game in GAMES:
+        game_id = game["id"]
+        if game["round"] == 1:
+            team_a = game["team_a"]
+            team_b = game["team_b"]
+        else:
+            src_a = actual.get(game["source_a"])
+            src_b = actual.get(game["source_b"])
+            if not src_a or not src_b:
+                continue  # upstream game not completed yet — skip
+            team_a = src_a["winner"]
+            team_b = src_b["winner"]
+
+        matchup_key = frozenset({team_a, team_b})
+        result = results_by_pair.get(matchup_key)
+        if result:
+            actual[game_id] = result
+
+    return actual
+
+
 def calculate_scores(participant_picks, results):
     """Calculate the total score for one participant.
 
@@ -102,7 +139,15 @@ def calculate_scores(participant_picks, results):
         margin_pts   — total margin bonus points
         breakdown    — dict of {game_id: score_one_pick result} for scored games
     """
-    results_lookup = build_results_lookup(results)
+    # Build a game_id → actual result mapping by walking the real bracket tree.
+    # This is the correct way to score rounds 2+: a participant earns points for
+    # picking the right winner of each game SLOT, regardless of whether they also
+    # correctly predicted both teams in that matchup.
+    #
+    # The old approach used the participant's own picks to reconstruct the matchup,
+    # which meant a single wrong upstream pick would make the frozenset not match
+    # any real game — silently zeroing out all downstream correct picks.
+    actual_bracket = build_actual_bracket(results)
 
     totals = {"total": 0, "correct": 0, "base_pts": 0, "upset_pts": 0, "margin_pts": 0}
     breakdown = {}
@@ -116,15 +161,8 @@ def calculate_scores(participant_picks, results):
         if not game:
             continue  # Unknown game ID — skip
 
-        # Figure out which two teams are in this game based on participant's own picks
-        # (for round 2+ games, the teams depend on earlier picks)
-        team_a, _, team_b, _ = resolve_teams(game_id, participant_picks)
-        if not team_a or not team_b:
-            continue  # Can't determine matchup — skip
-
-        # Check if ESPN has a result for this exact matchup
-        matchup_key = frozenset({team_a, team_b})
-        result = results_lookup.get(matchup_key)
+        # Look up the actual result for this bracket slot (independent of picks)
+        result = actual_bracket.get(game_id)
         if not result:
             continue  # Game hasn't been played yet — no points available
 
