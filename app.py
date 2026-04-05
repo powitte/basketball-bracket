@@ -675,6 +675,48 @@ def show_leaderboard():
     ranked = rank_participants(all_picks, results)
     win_pcts = compute_win_probabilities(ranked, results)
 
+    # ── Admin debug panel ─────────────────────────────────────────────────────
+    # Shows which bracket slots are being resolved by build_actual_bracket and
+    # which ESPN results are coming through. Helps diagnose scoring gaps.
+    # Remove this expander once scoring is confirmed correct.
+    from scoring import build_actual_bracket
+    _actual = build_actual_bracket(results)
+    with st.expander("🔧 Scoring debug (remove once confirmed)", expanded=False):
+        st.write(f"**ESPN results received:** {len(results)} completed games")
+        st.write(f"**Bracket slots resolved:** {len(_actual)} of 63")
+
+        missing_slots = [f"g{i}" for i in range(1, 64) if f"g{i}" not in _actual]
+        if missing_slots:
+            st.write(f"**Unresolved slots:** {', '.join(missing_slots)}")
+        else:
+            st.write("**All 63 slots resolved ✅**")
+
+        st.write("---")
+        st.write("**Rounds 3–6 resolution:**")
+        for r, rname in [(3,"S16"),(4,"E8"),(5,"FF"),(6,"Championship")]:
+            games_in_round = [g for g in GAMES if g["round"] == r]
+            for g in games_in_round:
+                gid = g["id"]
+                if gid in _actual:
+                    res = _actual[gid]
+                    st.write(f"✅ {rname} {gid} ({g['region']}): **{res['winner']}** def. {res['loser']} {res['winner_score']}–{res['loser_score']}")
+                else:
+                    # Show which source is missing to pinpoint the broken link
+                    src_a_ok = g.get("source_a") in _actual if g.get("source_a") else True
+                    src_b_ok = g.get("source_b") in _actual if g.get("source_b") else True
+                    missing_src = []
+                    if not src_a_ok:
+                        missing_src.append(f"{g['source_a']} missing")
+                    if not src_b_ok:
+                        missing_src.append(f"{g['source_b']} missing")
+                    detail = " — " + ", ".join(missing_src) if missing_src else " — matchup known but no ESPN result found"
+                    st.write(f"❌ {rname} {gid} ({g['region']}): NOT RESOLVED{detail}")
+
+        st.write("---")
+        st.write("**All ESPN results (bracket names):**")
+        for r in results:
+            st.write(f"  {r['winner']} def. {r['loser']}  ({r['winner_score']}–{r['loser_score']})")
+
     # ── Win probability callout (top 3) ──────────────────────────────────────
     # Shows each of the top 3 players' win probability prominently above the table.
     # Probability is based on current score + expected remaining points, where
