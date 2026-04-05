@@ -11,6 +11,8 @@
 # and the ESPN results and returns a sorted leaderboard.
 # ---------------------------------------------------------------------------
 
+from functools import lru_cache
+
 from config import POINTS_PER_WIN, UPSET_BONUS_PTS, MARGIN_BONUS_DIVISOR
 from bracket_data import GAMES, GAME_BY_ID, TEAM_SEEDS
 
@@ -52,9 +54,11 @@ def score_one_pick(picked_winner, actual_winner, actual_loser,
 
     # Upset bonus: winner has a HIGHER seed number than the loser.
     # In NCAA seeding, higher seed number = weaker team, so 12 beating 5 is an upset.
+    # loser_seed == 0 means the loser is unknown (synthetic bracket entry due to ESPN
+    # data gap) — skip the upset check in that case to avoid false bonuses.
     winner_seed = get_team_seed(actual_winner)
     loser_seed  = get_team_seed(actual_loser)
-    upset_pts = UPSET_BONUS_PTS if winner_seed > loser_seed else 0
+    upset_pts = UPSET_BONUS_PTS if (winner_seed > loser_seed and loser_seed > 0) else 0
 
     # Margin bonus: integer division so scores stay whole numbers.
     # A 10-point win = +5. An 11-point win = +5 (we round down).
@@ -87,39 +91,182 @@ def build_results_lookup(results):
     return lookup
 
 
+@lru_cache(maxsize=None)
+def _get_possible_teams(game_id):
+    """Return the frozenset of all teams that could possibly reach game_id.
+
+    For round 1 games this is just the two scheduled teams. For later rounds
+    it's the union of both source games' possible teams — i.e., everyone in
+    that bracket subtree. Used by build_actual_bracket's partial-match pass.
+
+    Results are cached because this is called repeatedly for the same game IDs.
+    """
+    game = GAME_BY_ID.get(game_id)
+    if not game:
+        return frozenset()
+    if game["round"] == 1:
+        return frozenset({game["team_a"], game["team_b"]})
+    return _get_possible_teams(game["source_a"]) | _get_possible_teams(game["source_b"])
+
+
 def build_actual_bracket(results):
     """Walk the bracket game tree using real ESPN results to determine who actually
     played (and who won) in each game slot (g1–g63).
 
-    This is needed because for rounds 2+, you can't know the actual matchup from
-    bracket_data.py alone — it depends on who won the prior games. We follow the
-    game tree starting from round 1 (where teams are fixed) and propagate forward.
+    ESPN occasionally omits individual game results (observed: 4 R64 games and
+    1 S16 game missing from the 2026 data). A single gap breaks the entire
+    forward chain for that sub-bracket. This function uses a multi-pass strategy
+    to recover as much of the chain as possible:
+
+    Pass 1 — standard forward chain (current approach, fast path)
+    Pass 2 — infer missing R64 winners: a team that appears in ANY later ESPN
+             result must have won its R64 game (the loser is eliminated and won't
+             appear again). Creates a synthetic entry with scores=0.
+    Pass 3 — forward chain again; resolves R32/S16/E8 games downstream of the
+             newly inferred R64 winners. Loops until convergence.
+    Pass 4 — partial matching: for a game with ONE known source team, scan
+             unassigned ESPN results for that team where the opponent is in the
+             valid bracket subtree for the unknown source. Covers cases like
+             "g49 unknown but g50=UConn and 'UConn def. Duke' is in ESPN" —
+             assigns the result to the parent game and synthesizes the unknown
+             source's entry (winner only, scores=0).
+    Pass 5 — final forward chain to resolve anything unlocked by pass 4.
 
     Returns a dict: {game_id: result_dict} where result_dict has winner, loser,
-    winner_score, loser_score (same shape as ESPN result entries).
+    winner_score, loser_score (same shape as ESPN result entries). Synthetic
+    entries have winner_score=loser_score=0 and loser="unknown" where the
+    actual opponent couldn't be determined from available data.
     """
     results_by_pair = build_results_lookup(results)
-    actual = {}
 
-    # GAMES is ordered round 1 → round 6, so processing in-order is safe —
-    # each game's sources will already be resolved before we reach it.
+    # All teams that appear in any non-First-Four ESPN result.
+    # If a team shows up here, they survived at least to R32 (the R64 loser
+    # would only appear in the R64 result, which is what we're trying to infer).
+    teams_in_results = {
+        team
+        for r in results
+        if r["winner"] != r["loser"]          # skip First Four self-matches
+        for team in (r["winner"], r["loser"])
+    }
+
+    # Index ESPN results by team name for fast lookup in pass 4.
+    team_to_results = {}
+    for r in results:
+        if r["winner"] == r["loser"]:
+            continue
+        for team in (r["winner"], r["loser"]):
+            team_to_results.setdefault(team, []).append(r)
+
+    actual   = {}   # game_id → result dict (real or synthetic)
+    assigned = set()  # frozensets of real ESPN result pairs already assigned to a slot
+
+    # ------------------------------------------------------------------
+    def _forward_pass():
+        """One sweep through the game list, resolving what we can via the
+        chain. Returns True if at least one new game was resolved."""
+        changed = False
+        for game in GAMES:
+            gid = game["id"]
+            if gid in actual:
+                continue
+            if game["round"] == 1:
+                team_a, team_b = game["team_a"], game["team_b"]
+            else:
+                src_a = actual.get(game["source_a"])
+                src_b = actual.get(game["source_b"])
+                if not src_a or not src_b:
+                    continue
+                team_a, team_b = src_a["winner"], src_b["winner"]
+
+            key = frozenset({team_a, team_b})
+            result = results_by_pair.get(key)
+            if result and key not in assigned:
+                actual[gid] = result
+                assigned.add(key)
+                changed = True
+        return changed
+
+    def _synthetic(winner, loser):
+        """Build a placeholder result dict for a game ESPN didn't return.
+        Scores are 0, so no margin bonus is awarded — unavoidable data gap.
+        """
+        return {"winner": winner, "loser": loser,
+                "winner_score": 0, "loser_score": 0, "margin": 0,
+                "display_winner": winner, "display_loser": loser}
+
+    # ------------------------------------------------------------------
+    # Pass 1: Forward chain
+    _forward_pass()
+
+    # ------------------------------------------------------------------
+    # Pass 2: Infer missing R64 winners.
+    # The loser of an R64 game is eliminated and won't appear in any R32+
+    # result. So if team_a shows up in ESPN results and team_b doesn't,
+    # team_a must have won the R64 game even if that result is absent.
     for game in GAMES:
-        game_id = game["id"]
-        if game["round"] == 1:
-            team_a = game["team_a"]
-            team_b = game["team_b"]
-        else:
-            src_a = actual.get(game["source_a"])
-            src_b = actual.get(game["source_b"])
-            if not src_a or not src_b:
-                continue  # upstream game not completed yet — skip
-            team_a = src_a["winner"]
-            team_b = src_b["winner"]
+        if game["round"] != 1 or game["id"] in actual:
+            continue
+        team_a, team_b = game["team_a"], game["team_b"]
+        a_seen = team_a in teams_in_results
+        b_seen = team_b in teams_in_results
+        if a_seen == b_seen:    # both or neither — ambiguous, skip
+            continue
+        winner = team_a if a_seen else team_b
+        loser  = team_b if a_seen else team_a
+        actual[game["id"]] = _synthetic(winner, loser)
 
-        matchup_key = frozenset({team_a, team_b})
-        result = results_by_pair.get(matchup_key)
-        if result:
-            actual[game_id] = result
+    # ------------------------------------------------------------------
+    # Pass 3: Forward chain again, looping until nothing new resolves.
+    changed = True
+    while changed:
+        changed = _forward_pass()
+
+    # ------------------------------------------------------------------
+    # Pass 4: Partial matching — one source resolved, one still missing.
+    #
+    # Example: g57 (East E8) has source_b=g50 resolved (UConn won) but
+    # source_a=g49 unresolved (its source g34 is unknowable because g3/g4
+    # have no ESPN data at all). However, "UConn def. Duke" IS in ESPN.
+    # Duke is in g49's possible-team set, so we can assign that result to
+    # g57 and create a synthetic g49 entry (winner=Duke, loser=unknown).
+    for game in GAMES:
+        gid = game["id"]
+        if gid in actual or game["round"] == 1:
+            continue
+        src_a = actual.get(game["source_a"])
+        src_b = actual.get(game["source_b"])
+        if src_a and src_b:
+            continue    # both known — forward pass should have caught this
+        if not src_a and not src_b:
+            continue    # neither known — can't proceed
+
+        known_team   = src_a["winner"] if src_a else src_b["winner"]
+        unknown_src  = game["source_b"] if src_a else game["source_a"]
+        possible     = _get_possible_teams(unknown_src)
+
+        for res in team_to_results.get(known_team, []):
+            rkey = frozenset({res["winner"], res["loser"]})
+            if rkey in assigned:
+                continue
+            other = res["loser"] if res["winner"] == known_team else res["winner"]
+            if other not in possible:
+                continue    # other team isn't from the right bracket subtree
+
+            # Valid match — assign this ESPN result to gid
+            actual[gid] = res
+            assigned.add(rkey)
+
+            # Synthesize a minimal entry for the unknown source so the chain
+            # can continue (winner is all we need; loser and scores are unknown)
+            if unknown_src not in actual:
+                actual[unknown_src] = _synthetic(other, "unknown")
+            break
+
+    # ------------------------------------------------------------------
+    # Pass 5: Final forward chain to resolve anything unlocked by pass 4
+    changed = True
+    while changed:
+        changed = _forward_pass()
 
     return actual
 
@@ -143,30 +290,23 @@ def calculate_scores(participant_picks, results):
     # This is the correct way to score rounds 2+: a participant earns points for
     # picking the right winner of each game SLOT, regardless of whether they also
     # correctly predicted both teams in that matchup.
-    #
-    # The old approach used the participant's own picks to reconstruct the matchup,
-    # which meant a single wrong upstream pick would make the frozenset not match
-    # any real game — silently zeroing out all downstream correct picks.
     actual_bracket = build_actual_bracket(results)
 
     totals = {"total": 0, "correct": 0, "base_pts": 0, "upset_pts": 0, "margin_pts": 0}
     breakdown = {}
 
-    # Loop through every game the participant picked
     for game_id, picked_team in participant_picks.items():
         if not picked_team:
-            continue  # Skip unpicked games (shouldn't happen after submission)
+            continue
 
         game = GAME_BY_ID.get(game_id)
         if not game:
-            continue  # Unknown game ID — skip
+            continue
 
-        # Look up the actual result for this bracket slot (independent of picks)
         result = actual_bracket.get(game_id)
         if not result:
-            continue  # Game hasn't been played yet — no points available
+            continue    # game not yet played (or unresolvable data gap)
 
-        # Score this pick
         score = score_one_pick(
             picked_winner=picked_team,
             actual_winner=result["winner"],
@@ -176,7 +316,6 @@ def calculate_scores(participant_picks, results):
         )
         breakdown[game_id] = score
 
-        # Accumulate totals
         totals["total"]      += score["total"]
         totals["base_pts"]   += score["base_pts"]
         totals["upset_pts"]  += score["upset_pts"]
@@ -184,8 +323,7 @@ def calculate_scores(participant_picks, results):
         if score["correct"]:
             totals["correct"] += 1
 
-    # Count correct picks per round — used for the round-by-round leaderboard columns.
-    # round_correct is a dict like {1: 6, 2: 3} meaning 6 correct R64, 3 correct R32, etc.
+    # Count correct picks per round for the round-by-round leaderboard columns
     round_correct = {}
     for game_id, s in breakdown.items():
         if s["correct"]:
@@ -202,32 +340,22 @@ def calculate_scores(participant_picks, results):
 def compute_expected_score(picks, results):
     """Estimate remaining expected points for one participant.
 
-    Methodology (per user spec):
+    Used as a fallback inside compute_win_probabilities for early rounds
+    (too many games to enumerate) and stored on ranked entries for display.
+
+    Methodology:
       - Each team has a 50% chance of winning each future game.
       - Each correct pick earns an average of 16 points (base + bonuses).
       - If a participant's picked team has been eliminated, that pick is worth 0.
-      - If a game has already been decided, it's already reflected in current score
-        and is excluded here.
-
-    Algorithm:
-      For each future pick (game not yet decided):
-        games_needed = round_number_of_pick - rounds_the_team_has_already_won
-        expected_pts = 16 * (0.5 ** games_needed)
+      - If a game has already been decided, it's in the current score already.
 
     Returns total expected additional points as a float.
     """
-    # Build team status from ESPN results:
-    #   wins_by_team: how many bracket rounds each team has won (0 = not yet played)
-    #   eliminated:   teams that lost a game (can't earn future points)
-    #
-    # First Four games have result["winner"] == result["loser"] (both map to the
-    # same combined slot name like "TEX/NCST") — we skip those because participants
-    # don't pick First Four games, and the First Four win isn't a scored bracket round.
     wins_by_team = {}
-    eliminated = set()
+    eliminated   = set()
     for result in results:
         if result["winner"] == result["loser"]:
-            continue  # First Four game — skip
+            continue    # First Four — skip
         wins_by_team[result["winner"]] = wins_by_team.get(result["winner"], 0) + 1
         eliminated.add(result["loser"])
 
@@ -241,16 +369,12 @@ def compute_expected_score(picks, results):
         round_num = game["round"]
 
         if picked_team in eliminated:
-            continue  # Team is out — zero expected points
+            continue    # team is out
 
         wins = wins_by_team.get(picked_team, 0)
-
         if wins >= round_num:
-            # Team already won this round — game is decided, in current score already
-            continue
+            continue    # already decided, in current score
 
-        # Team is still alive and this game hasn't been played yet.
-        # They need (round_num - wins) more wins to fulfill this pick.
         games_needed = round_num - wins
         expected += 16.0 * (0.5 ** games_needed)
 
@@ -260,93 +384,138 @@ def compute_expected_score(picks, results):
 def compute_win_probabilities(ranked, results):
     """Calculate the probability each participant wins the pool.
 
-    Strategy: enumerate every possible outcome for games that are still undecided
-    but whose matchup is already determined. For each scenario, score everyone
-    and award the win to whoever finishes first (ties split evenly).
-    Win probability = fraction of scenarios where you come out on top.
+    Uses recursive scenario enumeration: for each undecided game whose matchup
+    is already determined, branch on both outcomes and propagate forward. This
+    naturally handles cascading games (e.g., Championship teams depend on who
+    wins the Final Four) and gives 0% to anyone who cannot possibly catch the
+    leader.
 
-    This gives 0% to anyone who can't possibly catch the leader — which the old
-    proportional method couldn't do because it added a +1 floor to everyone.
+    Only games whose BOTH participants have appeared in ESPN results are
+    enumerated. This filters out historical data gaps (R64 games ESPN never
+    returned) so they aren't mistakenly treated as future games.
 
-    Falls back to a score-proportional estimate when there are too many remaining
-    games to enumerate (> 20 games = > 1 million scenarios), which only happens
-    in early rounds before the Sweet 16.
+    Falls back to a score-proportional estimate when more than 15 undecided
+    games remain simultaneously determinable, which only occurs in the very
+    early rounds (during or just after R64).
 
     Args:
         ranked:  list of participant dicts from rank_participants()
         results: list of completed game result dicts from espn_api
     """
-    # Determine what the actual bracket looks like right now
     actual = build_actual_bracket(results)
 
-    # Find games that are undecided but whose matchup is already determined:
-    # round 1 teams are always known; later rounds need both source games done.
-    remaining = []
-    for game in GAMES:
-        gid = game["id"]
-        if gid in actual:
-            continue  # already played
-        if game["round"] == 1:
-            team_a, team_b = game["team_a"], game["team_b"]
-        else:
-            src_a = actual.get(game["source_a"])
-            src_b = actual.get(game["source_b"])
-            if not src_a or not src_b:
-                continue  # matchup not yet settled (earlier game still to play)
-            team_a = src_a["winner"]
-            team_b = src_b["winner"]
-        remaining.append((gid, team_a, team_b))
+    # Teams that have an actual ESPN result — used to filter out data-gap games
+    # (teams with zero ESPN appearances can't be distinguished from future entrants).
+    teams_active = {
+        team
+        for r in results
+        if r["winner"] != r["loser"]
+        for team in (r["winner"], r["loser"])
+    }
 
-    n = len(remaining)
+    # All games not yet in actual — candidates for future enumeration
+    all_undecided = [g for g in GAMES if g["id"] not in actual]
 
-    # --- Fallback for early rounds (too many scenarios to enumerate) ---
-    # Once we're past R64 there are at most 16 undecided games → 65,536 scenarios,
-    # which runs in well under a second. R64 itself has 32 undecided → 4 billion → skip.
-    if n > 20:
+    # Count how many undecided games are currently determinable with active teams.
+    # If this exceeds 15 (→ >32K scenarios) we fall back to the proportional method.
+    def _count_now_determinable(cur_actual):
+        count = 0
+        for game in all_undecided:
+            if game["id"] in cur_actual:
+                continue
+            if game["round"] == 1:
+                ta, tb = game["team_a"], game["team_b"]
+            else:
+                sa = cur_actual.get(game["source_a"])
+                sb = cur_actual.get(game["source_b"])
+                if not sa or not sb:
+                    continue
+                ta, tb = sa["winner"], sb["winner"]
+            if ta in teams_active and tb in teams_active:
+                count += 1
+        return count
+
+    if _count_now_determinable(actual) > 15:
+        # Fallback: score-proportional with +1 floor (appropriate for early rounds
+        # when there are still many games and anyone can theoretically win)
         weights = [max(e["score"] + e.get("expected_score", 0.0), 0.0) + 1 for e in ranked]
         total_w = sum(weights)
-        raw = [w / total_w * 100 for w in weights]
+        raw     = [w / total_w * 100 for w in weights]
         rounded = [round(p, 1) for p in raw]
-        diff = round(100.0 - sum(rounded), 1)
+        diff    = round(100.0 - sum(rounded), 1)
         if rounded:
             rounded[0] = round(rounded[0] + diff, 1)
         return rounded
 
-    # --- Enumerate all 2^n outcome scenarios ---
-    base_scores = [e["score"] for e in ranked]
+    base_scores   = [e["score"] for e in ranked]
     scenario_wins = [0.0] * len(ranked)
+    total_scenarios = [0]
 
-    for mask in range(2 ** n):
-        scores = list(base_scores)
+    def _recurse(cur_actual, incr):
+        """Recursively enumerate undecided game outcomes.
 
-        for bit, (gid, team_a, team_b) in enumerate(remaining):
-            # bit=0 → team_a wins, bit=1 → team_b wins
-            winner = team_b if (mask >> bit) & 1 else team_a
-            loser  = team_a if winner == team_b else team_b
+        cur_actual:    actual_bracket extended with this branch's decided games
+        incr:          list of incremental points each participant has earned
+                       from games decided in this branch so far
+        """
+        # Find the first undecided game whose matchup is now determinable
+        # and whose teams have actually appeared in ESPN (not data-gap games)
+        for game in all_undecided:
+            gid = game["id"]
+            if gid in cur_actual:
+                continue
+            if game["round"] == 1:
+                ta, tb = game["team_a"], game["team_b"]
+            else:
+                sa = cur_actual.get(game["source_a"])
+                sb = cur_actual.get(game["source_b"])
+                if not sa or not sb:
+                    continue
+                ta, tb = sa["winner"], sb["winner"]
 
-            # Points for a correct pick: base + upset bonus + expected margin bonus.
-            # Upset bonus is deterministic (seeds are fixed); margin bonus uses the
-            # tournament average (~10-pt margin → +5) as a stand-in.
-            winner_seed = TEAM_SEEDS.get(winner, 0)
-            loser_seed  = TEAM_SEEDS.get(loser, 0)
-            upset_pts = UPSET_BONUS_PTS if winner_seed > loser_seed else 0
-            pts = POINTS_PER_WIN + upset_pts + 5
+            # Only enumerate games with teams that are confirmed active in ESPN.
+            # This excludes R64 games whose results ESPN never returned, which are
+            # already decided but have no data — they should not be re-enumerated.
+            if ta not in teams_active or tb not in teams_active:
+                continue
 
-            for i, entry in enumerate(ranked):
-                if entry["picks"].get(gid) == winner:
-                    scores[i] += pts
+            # Enumerate both outcomes for this game
+            for winner, loser in [(ta, tb), (tb, ta)]:
+                w_seed = TEAM_SEEDS.get(winner, 0)
+                l_seed = TEAM_SEEDS.get(loser, 0)
+                # Award base + upset bonus (deterministic from seeds) +
+                # expected margin bonus (~10-pt average game → +5 pts)
+                pts = POINTS_PER_WIN + (UPSET_BONUS_PTS if w_seed > l_seed else 0) + 5
 
-        # Award the scenario win; split equally among tied leaders
-        best = max(scores)
-        winners_idx = [i for i, s in enumerate(scores) if s == best]
+                new_incr = list(incr)
+                for i, entry in enumerate(ranked):
+                    if entry["picks"].get(gid) == winner:
+                        new_incr[i] += pts
+
+                # Extend the bracket so downstream games (e.g., Championship
+                # after the FF) can be determined in the next recursion level
+                new_actual = {**cur_actual,
+                              gid: {"winner": winner, "loser": loser,
+                                    "winner_score": 0, "loser_score": 0}}
+                _recurse(new_actual, new_incr)
+
+            return  # processed the first determinable game; let recursion handle the rest
+
+        # Leaf: no more determinable active-team games → record this scenario's outcome
+        final = [base_scores[i] + incr[i] for i in range(len(ranked))]
+        best  = max(final)
+        winners_idx = [i for i, s in enumerate(final) if s == best]
         share = 1.0 / len(winners_idx)
         for i in winners_idx:
             scenario_wins[i] += share
+        total_scenarios[0] += 1
 
-    total = sum(scenario_wins) or 1  # guard against empty (shouldn't happen)
-    raw = [w / total * 100 for w in scenario_wins]
+    _recurse(actual, [0.0] * len(ranked))
+
+    tot = total_scenarios[0] or 1
+    raw     = [scenario_wins[i] / tot * 100 for i in range(len(ranked))]
     rounded = [round(p, 1) for p in raw]
-    diff = round(100.0 - sum(rounded), 1)
+    diff    = round(100.0 - sum(rounded), 1)
     if rounded:
         rounded[0] = round(rounded[0] + diff, 1)
     return rounded
@@ -360,18 +529,11 @@ def rank_participants(all_picks_list, results):
                         keys 'name', 'timestamp', 'picks'
         results:        list of completed game result dicts from espn_api
 
-    Returns a list of dicts sorted by score descending (ties broken by name):
-        name        — participant's name
-        score       — total points
-        correct     — number of correct picks
-        base_pts    — base points subtotal
-        upset_pts   — upset bonus subtotal
-        margin_pts  — margin bonus subtotal
-        picks       — the raw picks dict (for displaying their bracket)
+    Returns a list of dicts sorted by score descending (ties broken by name).
     """
     ranked = []
     for entry in all_picks_list:
-        scores = calculate_scores(entry["picks"], results)
+        scores   = calculate_scores(entry["picks"], results)
         expected = compute_expected_score(entry["picks"], results)
         ranked.append({
             "name":           entry["name"],
@@ -384,10 +546,8 @@ def rank_participants(all_picks_list, results):
             "expected_score": expected,
             "picks":          entry["picks"],
             "breakdown":      scores["breakdown"],
-            # Pass through the bracket strategy so the leaderboard can display it
             "method":         entry.get("method", "custom"),
         })
 
-    # Sort: highest score first; alphabetical name as tiebreaker
     ranked.sort(key=lambda x: (-x["score"], x["name"]))
     return ranked
